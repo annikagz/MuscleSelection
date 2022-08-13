@@ -68,41 +68,79 @@ def group_windows_into_sequences(signals, labels, n_windows_per_sequence, window
 
 def shuffle(signals, labels):
     shuffler = np.random.permutation(signals.shape[-1])
-    signals = signals[:, :, :, shuffler]
-    labels = labels[:, :, shuffler]
+    if signals.ndim == 4:
+        signals = signals[:, :, :, shuffler]
+        labels = labels[:, :, shuffler]
+    elif signals.ndim == 3:
+        signals = signals[:, :, shuffler]
+        labels = labels[:, shuffler]
     return signals, labels
 
 
 def split_into_train_test(signals, labels, train_size, split_axis):
-    if split_axis == -1:
-        signals = signals.transpose((3, 0, 1, 2))
-        labels = labels.transpose((2, 0, 1))
-    elif split_axis != -1 and split_axis!= 0:
-        raise ValueError('You need to have the split axis be either in first or last place.')
-    x_train, x_test, y_train, y_test = train_test_split(signals, labels, train_size=train_size, shuffle=False)
-    x_train = x_train.transpose((1, 2, 3, 0))
-    x_test = x_test.transpose((1, 2, 3, 0))
-    y_train = y_train.transpose((1, 2, 0))
-    y_test = y_test.transpose((1, 2, 0))
+    if signals.ndim == 4:
+        if split_axis == -1:
+            signals = signals.transpose((3, 0, 1, 2))
+            labels = labels.transpose((2, 0, 1))
+        elif split_axis != -1 and split_axis!= 0:
+            raise ValueError('You need to have the split axis be either in first or last place.')
+        x_train, x_test, y_train, y_test = train_test_split(signals, labels, train_size=train_size, shuffle=False)
+        x_train = x_train.transpose((1, 2, 3, 0))
+        x_test = x_test.transpose((1, 2, 3, 0))
+        y_train = y_train.transpose((1, 2, 0))
+        y_test = y_test.transpose((1, 2, 0))
+    elif signals.ndim == 3:
+        if split_axis == -1:
+            signals = signals.transpose((2, 0, 1))
+            labels = labels.transpose((1, 0))
+        elif split_axis != -1 and split_axis!= 0:
+            raise ValueError('You need to have the split axis be either in first or last place.')
+        x_train, x_test, y_train, y_test = train_test_split(signals, labels, train_size=train_size, shuffle=False)
+        x_train = x_train.transpose((2, 1, 0))
+        x_test = x_test.transpose((2, 1, 0))
+        y_train = y_train.transpose((1, 0))
+        y_test = y_test.transpose((1, 0))
+    else:
+        raise ValueError('Your input arrays have the wrong shape.')
     return x_train, x_test, y_train, y_test
 
 
 def split_into_batches(x_train, y_train, x_test, y_test, batch_size, batch_axis=1):
-    cropped_length = int(x_train.shape[-1] - (x_train.shape[-1] % batch_size))
-    x_train = x_train[:, :, :, :cropped_length]
-    y_train = y_train[:, :, :cropped_length]
-    x_batches = []
-    for i in range(0, int(x_train.shape[-1]), int(batch_size)):
-        x_batches.append(np.expand_dims(x_train[:, :, :, i:i+batch_size], axis=3))
-    x_train = np.concatenate(x_batches, axis=3)
-    y_train = y_train.reshape((y_train.shape[0], y_train.shape[1], -1, batch_size))
-    x_transposition = [0, 1, 2, 3]
-    x_transposition.insert(int(batch_axis), 4)
-    y_transposition = [0, 1, 2]
-    y_transposition.insert(int(batch_axis), 3)
-    x_train = x_train.transpose(x_transposition)
-    y_train = y_train.transpose(y_transposition)
-    x_test = np.expand_dims(x_test, axis=batch_axis)
-    y_test = np.expand_dims(y_test, axis=batch_axis)
+    if x_train.ndim == 4:
+        cropped_length = int(x_train.shape[-1] - (x_train.shape[-1] % batch_size))
+        x_train = x_train[:, :, :, :cropped_length]
+        y_train = y_train[:, :, :cropped_length]
+        x_batches = []
+        for i in range(0, int(x_train.shape[-1]), int(batch_size)):
+            x_batches.append(np.expand_dims(x_train[:, :, :, i:i+batch_size], axis=3))
+        x_train = np.concatenate(x_batches, axis=3)
+        y_train = y_train.reshape((y_train.shape[0], y_train.shape[1], -1, batch_size))
+        x_transposition = [0, 1, 2, 3]
+        x_transposition.insert(int(batch_axis), 4)
+        y_transposition = [0, 1, 2]
+        y_transposition.insert(int(batch_axis), 3)
+        x_train = x_train.transpose(x_transposition)
+        y_train = y_train.transpose(y_transposition)
+        x_test = np.expand_dims(x_test, axis=batch_axis)
+        y_test = np.expand_dims(y_test, axis=batch_axis)
+    elif x_train.ndim == 3:
+        cropped_length = int(x_train.shape[-1] - (x_train.shape[-1] % batch_size))
+        x_train = x_train[:, :, :cropped_length]
+        y_train = y_train[:, :cropped_length]
+        x_batches = []
+        for i in range(0, int(x_train.shape[-1]), int(batch_size)):
+            x_batches.append(np.expand_dims(x_train[:, :, i:i + batch_size], axis=2))
+        x_train = np.concatenate(x_batches, axis=2)
+        y_train = y_train.reshape((y_train.shape[0], -1, batch_size))
+        x_transposition = [0, 1, 2]
+        x_transposition.insert(int(batch_axis), 3)
+        y_transposition = [0, 1]
+        y_transposition.insert(int(batch_axis), 2)
+        x_train = x_train.transpose(x_transposition)
+        y_train = y_train.transpose(y_transposition)
+        x_test = np.expand_dims(x_test, axis=batch_axis)
+        y_test = np.expand_dims(y_test, axis=batch_axis)
+    else:
+        raise ValueError('The input dimensions of the array are wrong')
     return x_train, y_train, x_test, y_test
 

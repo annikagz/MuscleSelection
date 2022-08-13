@@ -38,6 +38,7 @@ class SelectionProcess:
         self.reserved_signals = None
         self.reserved_labels = None
         self.performance_report = None
+        self.general_report = pd.DataFrame(columns=list(['Number of electrodes']) + list(self.list_of_muscles))
 
     def create_dataset_across_speeds(self):
         training_signals = []
@@ -70,6 +71,8 @@ class SelectionProcess:
         self.performance_report = pd.DataFrame({'Number of channels': 15, 'Number of epochs': RunningModel.epochs_ran,
                                                 'Training loss': RunningModel.recorded_training_error,
                                                 'Validation loss': RunningModel.recorded_validation_error,
+                                                'Model accuracy': RunningModel.recorded_validation_error /
+                                                                  (max(self.training_labels)-min(self.training_labels)),
                                                 'Electrode removed': 'None'})
 
     def train_with_one_drop_out(self):
@@ -100,5 +103,27 @@ class SelectionProcess:
                     training_values.append(RunningModel.recorded_training_error)
                     validation_values.append(RunningModel.recorded_validation_error)
                     epochs_ran.append(RunningModel.epochs_ran)
+            self.general_report.append(pd.DataFrame(training_values,
+                                                    index=['Training error with ' + str(counter-1) + 'electrodes'],
+                                                    columns=self.general_report.columns))
+            self.general_report.append(pd.DataFrame(validation_values,
+                                                    index=['Validation error with ' + str(counter - 1) + 'electrodes'],
+                                                    columns=self.general_report.columns))
+            self.general_report.append(pd.DataFrame(epochs_ran,
+                                                    index=['Epochs ran with ' + str(counter - 1) + 'electrodes'],
+                                                    columns=self.general_report.columns))
+
+            electrode_to_remove = validation_values.index(min(validation_values))
+            # we want to remove the electrode whose absence has the least impact on model accuracy
+            self.performance_report.append(pd.DataFrame([counter-1, epochs_ran, training_values[electrode_to_remove],
+                                                         validation_values[electrode_to_remove],
+                                                         validation_values[electrode_to_remove] /
+                                                         (max(self.training_labels) - min(self.training_labels))],
+                                                        columns=self.performance_report.columns))
+            for row in range(self.updated_training_signals.shape[0]):
+                self.updated_training_signals[row, electrode_to_remove] = 0
+            counter -= 1
+
+
 
 
