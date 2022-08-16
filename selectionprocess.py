@@ -8,7 +8,8 @@ from torch.utils.tensorboard import SummaryWriter
 from utility.dataprocessing import split_signals_into_TCN_windows, group_windows_into_sequences, shuffle, \
     split_into_train_test, split_into_batches, extract_hdf5_data_to_EMG_and_labels
 from utility.plots import plot_the_predictions
-from networks import RunConvLSTM, CNNLSTMDataPrep
+from utility.conversions import normalise_signals
+from networks import RunConvLSTM, CNNLSTMDataPrep, RunTCN
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -26,8 +27,8 @@ class SelectionProcess:
     """
     def __init__(self, subject, label_name, reserved_fraction=0.05):
         self.list_of_speeds = ['07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', 'R']
-        self.list_of_muscles = ["ESL-L", "ESL-R", "ESI-L", "ESI-R", "MF-L", "MF-R", "RF", "VM", "VL", "BF", "ST", "TA", "SO",
-                           "GM", "GL"]
+        self.list_of_muscles = ["ESL-L", "ESL-R", "ESI-L", "ESI-R", "MF-L", "MF-R", "RF", "VM", "VL", "BF", "ST", "TA",
+                                "SO", "GM", "GL"]
         self.list_angles = list(["LHipAngles", "LKneeAngles", "LAnkleAngles", "RHipAngles", "RKneeAngles", "RAnkleAngles"])
         self.subject = subject
         self.label_name = label_name
@@ -40,6 +41,10 @@ class SelectionProcess:
         self.performance_report = None
         self.general_report = pd.DataFrame(columns=list(['Number of electrodes']) + list(self.list_of_muscles))
 
+        self.create_dataset_across_speeds()
+        print("Data prep done")
+        self.train_model_with_all_channels()
+
     def create_dataset_across_speeds(self):
         training_signals = []
         training_labels = []
@@ -49,9 +54,9 @@ class SelectionProcess:
             EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(self.subject, self.list_of_speeds[i],
                                                                       self.list_of_muscles, label_name=self.label_name)
             cut_off_idx = int(EMG_signals.shape[0] * (1.0 - self.reserved_fraction))
-            training_signals.append(EMG_signals[0:cut_off_idx, :])
+            training_signals.append(normalise_signals(EMG_signals[0:cut_off_idx, :]))
             training_labels.append(labels[0:cut_off_idx, :])
-            reserved_signals.append(EMG_signals[cut_off_idx::, :])
+            reserved_signals.append(normalise_signals(EMG_signals[cut_off_idx::, :]))
             reserved_labels.append(labels[cut_off_idx::, :])
         self.training_signals = np.concatenate(training_signals, axis=0)
         self.training_labels = np.concatenate(training_labels, axis=0)
@@ -59,12 +64,14 @@ class SelectionProcess:
         self.reserved_labels = np.concatenate(reserved_labels, axis=0)
 
     def train_model_with_all_channels(self):
+        #torch.cuda.empty_cache()
         x_train, x_test, y_train, y_test = CNNLSTMDataPrep(self.training_signals, self.training_labels,
-                                                           window_length=256, window_step=10, batch_size=8,
-                                                           sequence_length=10, label_delay=0, training_size=0.95,
-                                                           shuffle_full_dataset=True).prepped_data
-        RunningModel = RunConvLSTM(x_train, y_train, x_test, y_test, n_channels=15, lstm_hidden=16, epochs=20,
-                                   saved_model_name=self.subject + '_ConvLSTM')
+                                                           window_length=512, window_step=40, batch_size=64,
+                                                           sequence_length=15, label_delay=0, training_size=0.85,
+                                                           lstm_sequences=False, split_data=True,
+                                                           shuffle_full_dataset=False).prepped_data
+        RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=10,
+                              saved_model_name='TCN_' + self.subject, angle_range=90)
         RunningModel.train_network()
         plot_the_predictions(RunningModel.model, RunningModel.saved_model_path, RunningModel.saved_model_name, x_test,
                              y_test)
@@ -74,6 +81,8 @@ class SelectionProcess:
                                                 'Model accuracy': RunningModel.recorded_validation_error /
                                                                   (max(self.training_labels)-min(self.training_labels)),
                                                 'Electrode removed': 'None'})
+        print(self.performance_report)
+        exit()
 
     def train_with_one_drop_out(self):
         self.updated_training_signals = self.training_signals
@@ -92,14 +101,20 @@ class SelectionProcess:
                     training_signals = self.updated_training_signals
                     for val in range(training_signals.shape[0]):
                         training_signals[val, i] = 0
-                    x_train, x_test, y_train, y_test = CNNLSTMDataPrep(self.updated_training_signals, self.training_labels,
-                                                                       window_length=256, window_step=10, batch_size=8,
-                                                                       sequence_length=10, label_delay=0, training_size=0.95,
-                                                                       shuffle_full_dataset=True).prepped_data
-                    RunningModel = RunConvLSTM(x_train, y_train, x_test, y_test, n_channels=15, lstm_hidden=16, epochs=80,
-                                               saved_model_name=self.subject + '_ConvLSTM_' + str(counter) + '_without_' +
-                                                                self.list_of_muscles[i])
+                    x_train, x_test, y_train, y_test = CNNLSTMDataPrep(self.updated_training_signals,
+                                                                       self.training_labels, window_length=512,
+                                                                       window_step=40, batch_size=64,
+                                                                       sequence_length=15, label_delay=0,
+                                                                       training_size=0.85, lstm_sequences=False,
+                                                                       split_data=True,
+                                                                       shuffle_full_dataset=False).prepped_data
+                    RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=1,
+                                          saved_model_name='TCN_' + self.subject + str(counter-1) +
+                                                           'electrodes_without_' + self.list_of_muscles[i],
+                                          angle_range=90)
                     RunningModel.train_network()
+                    plot_the_predictions(RunningModel.model, RunningModel.saved_model_path,
+                                         RunningModel.saved_model_name, x_test, y_test, lstm_layers=0)
                     training_values.append(RunningModel.recorded_training_error)
                     validation_values.append(RunningModel.recorded_validation_error)
                     epochs_ran.append(RunningModel.epochs_ran)

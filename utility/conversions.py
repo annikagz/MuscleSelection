@@ -14,3 +14,10 @@ def upsample_based_on_axis(time_series, n_samples, axis=0):
         xold = np.arange(0, time_series.shape[0])
         upsampled_series = interp1d(xold, time_series, axis=axis)(xnew)
         return upsampled_series
+
+
+def normalise_signals(EMG_signals):
+    for channel in range(EMG_signals.shape[-1]):
+        EMG_signals[:, channel] = (EMG_signals[:, channel] - EMG_signals[:, channel].mean(axis=0))
+        EMG_signals[:, channel] = EMG_signals[:, channel] / (0.95 * np.max(np.abs(EMG_signals[:, channel])))
+    return EMG_signals

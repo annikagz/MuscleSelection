@@ -74,6 +74,9 @@ def shuffle(signals, labels):
     elif signals.ndim == 3:
         signals = signals[:, :, shuffler]
         labels = labels[:, shuffler]
+    elif signals.ndim == 5:
+        signals = signals[:, :, :, :, shuffler]
+        labels = labels[:, :, :, shuffler]
     return signals, labels
 
 

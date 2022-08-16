@@ -1,3 +1,5 @@
+import math
+
 import torch.nn as nn
 import torch
 from tqdm import tqdm
@@ -6,6 +8,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from utility.dataprocessing import split_signals_into_TCN_windows, group_windows_into_sequences, shuffle, \
     split_into_train_test, split_into_batches
+from utility.conversions import normalise_signals
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -35,9 +38,7 @@ class CNNLSTMDataPrep:
         self.training_size = training_size
 
         # NORMALISE THE SIGNAL -----------------------------------------------------------------------------------------
-        for channel in range(self.EMG_signals.shape[-1]):
-            self.EMG_signals[:, channel] = self.EMG_signals[:, channel] \
-                                           / (0.95 * np.max(np.abs(self.EMG_signals[:, channel])))
+        self.EMG_signals = normalise_signals(self.EMG_signals)
 
         # WINDOW THE SIGNAL --------------------------------------------------------------------------------------------
         self.windowed_signals, self.windowed_labels = split_signals_into_TCN_windows\
@@ -88,10 +89,10 @@ class CNNLSTMDataPrep:
         self.prepped_data = self.x_train, self.x_test, self.y_train, self.y_test
 
     def turn_into_tensors(self):
-        self.x_train = torch.autograd.Variable(torch.from_numpy(self.x_train), requires_grad=True).to(device)
-        self.y_train = torch.autograd.Variable(torch.from_numpy(self.y_train), requires_grad=True).to(device)
-        self.x_test = torch.from_numpy(self.x_test).to(device)
-        self.y_test = torch.from_numpy(self.y_test).to(device)
+        self.x_train = torch.autograd.Variable(torch.from_numpy(self.x_train), requires_grad=True)
+        self.y_train = torch.autograd.Variable(torch.from_numpy(self.y_train), requires_grad=True)
+        self.x_test = torch.from_numpy(self.x_test)
+        self.y_test = torch.from_numpy(self.y_test)
 
 
 # CONVOLUTIONAL LSTM NETWORK ===========================================================================================
@@ -122,7 +123,7 @@ class ConvLSTMNetwork(nn.Module):
         self.input_size = n_inputs
         self.hidden_size = lstm_hidden_size
         self.lstm_layers = lstm_n_layers
-        self.flattened_length = 512
+        self.flattened_length = 960
         self.dropout = dropout
 
         self.CNN = nn.Sequential(
@@ -130,31 +131,41 @@ class ConvLSTMNetwork(nn.Module):
                       dilation=dilation, padding='same'),  # (1, 8, 512)
             nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 8, 256)
-            nn.Conv1d(in_channels=16, out_channels=self.hidden_size, kernel_size=kernel_size, stride=stride, dilation=dilation,
+            nn.Conv1d(in_channels=16, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
             nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 16, 128)
-            nn.Conv1d(in_channels=self.hidden_size, out_channels=self.hidden_size, kernel_size=kernel_size, stride=stride, dilation=dilation,
+            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
             nn.LeakyReLU(),
-            nn.MaxPool1d(kernel_size=3, stride=2)  # (1, 16, 64)
+            nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 16, 64)
+            nn.Conv1d(in_channels=64, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
+                      padding='same'),
+            nn.LeakyReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2),
+            nn.Conv1d(in_channels=64, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
+                      padding='same'),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2)
         )
 
         self.LSTM = nn.LSTM(input_size=self.hidden_size, hidden_size=self.hidden_size, num_layers=self.lstm_layers,
                             batch_first=True)
 
         self.DenseLayers = nn.Sequential(
-            nn.Linear(self.flattened_length, int(self.flattened_length/2)),  # (1, 512)
+            nn.Linear(int(self.flattened_length), int(self.flattened_length / 2)),  # (1, 512)
             nn.ReLU(),
-            nn.Dropout(self.dropout),
+            nn.Dropout(dropout),
             nn.Linear(int(self.flattened_length / 2), int(self.flattened_length / 4)),  # (1, 256)
             nn.ReLU(),
-            nn.Dropout(self.dropout),
+            nn.Dropout(dropout),
             nn.Linear(int(self.flattened_length / 4), int(self.flattened_length / 8)),  # (1, 128)
             nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(int(self.flattened_length / 8), 1),
-            nn.Sigmoid()
+            nn.Dropout(dropout),
+            nn.Linear(int(self.flattened_length / 8), int(self.flattened_length / 16)),  # (1, 128)
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(self.flattened_length / 16), 1)
         )
 
     def forward(self, EMG_signal, hidden_tuple):
@@ -168,7 +179,7 @@ class ConvLSTMNetwork(nn.Module):
         out = torch.transpose(out, -2, -1)
         out = nn.Flatten()(out)
         self.flattened_length = out.shape[-1]
-        out = self.DenseLayers(out)*70
+        out = self.DenseLayers(out)
         return out, hidden_tuple
 
 
@@ -196,7 +207,7 @@ class RunConvLSTM:
         rep_step = 0
         lowest_error = 1000.0
         cut_off_counter = 0
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999))
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.000001)
         lr = 0.0001
         for epoch in range(self.epochs):
             print("Epoch number:", epoch)
@@ -242,50 +253,59 @@ class RunConvLSTM:
                 cut_off_counter += 1
 
             # STOP THE MODEL WHEN IT IS NO LONGER LEARNING
-            if cut_off_counter > 2:
+            if cut_off_counter > 3:
                 if lr == 0.0001:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00005, betas=(0.9, 0.999))
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999),
+                                                 weight_decay=0.00001)
                     print("optimizer updated to version 2")
                     cut_off_counter = 0
                     lr = 0.00005
                 elif lr == 0.00005:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999),
+                                                 weight_decay=0.0001)
                     cut_off_counter = 0
                     print("optimizer updated to version 3")
                     lr = 0.00001
+                elif lr == 0.00001:
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999),
+                                                 weight_decay=0.001)
+                    cut_off_counter = 0
+                    print("optimizer updated to version final")
+                    lr = 0.000001
                 else:
                     break
 
 
 # TEMPORAL CONVOLUTIONAL NETWORK =======================================================================================
 class TempConvNetwork(nn.Module):
-    def __init__(self, n_inputs=1, kernel_size=5, stride=1, dilation=5, dropout=0.2):
+    def __init__(self, n_inputs=1, kernel_size=5, stride=1, dilation=5, dropout=0.2, angle_range=70):
         super(TempConvNetwork, self).__init__()
         # Here, define each layer with their inputs, for example:
         self.input_size = n_inputs
         self.flattened_length = 992
+        self.angle_range = angle_range
 
         self.TCN = nn.Sequential(
             nn.Conv1d(in_channels=self.input_size, out_channels=16, kernel_size=kernel_size, stride=stride,
                       dilation=dilation, padding='same'),  # (1, 8, 512)
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 8, 256)
             nn.Conv1d(in_channels=16, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 16, 128)
             nn.Conv1d(in_channels=32, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 16, 64)
             nn.Conv1d(in_channels=32, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),
-            nn.Conv1d(in_channels=32, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
-                      padding='same'),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=3, stride=2),
+            # nn.Conv1d(in_channels=64, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
+            #           padding='same'),
+            # nn.ReLU(),
+            # nn.MaxPool1d(kernel_size=3, stride=2),
             nn.Flatten(),  # (1, 1024)
             nn.Linear(int(self.flattened_length), int(self.flattened_length / 2)),  # (1, 512)
             nn.ReLU(),
@@ -296,22 +316,27 @@ class TempConvNetwork(nn.Module):
             nn.Linear(int(self.flattened_length / 4), int(self.flattened_length / 8)),  # (1, 128)
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(int(self.flattened_length / 8), 1)
+            nn.Linear(int(self.flattened_length / 8), int(self.flattened_length / 16)),  # (1, 128)
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(self.flattened_length / 16), 1),
+            # nn.Sigmoid()
         )
 
     def forward(self, EMG_signal):
         # (batch, 1, 2048)
-        out = self.TCN(EMG_signal)
+        out = self.TCN(EMG_signal) #* self.angle_range
         return out
 
 
 class RunTCN:
-    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name):
-        self.model = TempConvNetwork(n_inputs=n_channels, kernel_size=3, stride=1, dilation=2, dropout=0.4).to(device)
+    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range):
+
+        self.model = TempConvNetwork(n_inputs=n_channels, kernel_size=5, stride=1, dilation=4, dropout=0.4, angle_range=angle_range).to(device)
         self.model_type = 'TCN'
         self.saved_model_name = saved_model_name
         self.saved_model_path = '/media/ag6016/Storage/MuscleSelection/Models/' + self.saved_model_name + '.pth'
-        self.criterion = nn.L1Loss().to(device)
+        self.criterion = nn.MSELoss().to(device)
         self.epochs = epochs
         self.writer = SummaryWriter()
         self.x_train = x_train
@@ -326,31 +351,37 @@ class RunTCN:
         rep_step = 0
         lowest_error = 1000.0
         cut_off_counter = 0
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999))
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.000001)
         lr = 0.0001
         for epoch in range(self.epochs):
             print("Epoch number:", epoch)
             running_training_loss = 0.0
             running_validation_loss = 0.0
+
             for rep in tqdm(np.arange(self.x_train.shape[-1])):
-                predicted = self.model.forward(EMG_signal=(self.x_train[:, :, :, rep].float()))
-                loss = self.criterion(predicted, self.y_train[:, :, rep].float())
+                #torch.cuda.empty_cache()
+                x_train = self.x_train[:, :, :, rep].to(device)
+                y_train = self.y_train[:, :, rep].to(device)
+                predicted = self.model.forward(EMG_signal=x_train.float())
+                loss = self.criterion(predicted, y_train.float())
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 self.writer.add_scalar("Training loss " + self.saved_model_name, loss, global_step=rep_step)
                 running_training_loss += loss.item()
                 rep_step += 1
-            recorded_training_error = running_training_loss / (self.x_train.shape[-1])
+            recorded_training_error = math.sqrt(running_training_loss / (self.x_train.shape[-1]))
 
             # VALIDATION LOOP
             with torch.no_grad():
                 for rep in range(self.x_test.shape[-1]):
-                    predicted = self.model.forward(EMG_signal=(self.x_test[:, :, :, rep].float()))
-                    validation_loss = self.criterion(predicted, self.y_test[:, :, rep].float())
+                    x_test = self.x_test[:, :, :, rep].to(device)
+                    y_test = self.y_test[:, :, rep].to(device)
+                    predicted = self.model.forward(EMG_signal=x_test.float())
+                    validation_loss = self.criterion(predicted, y_test.float())
                     running_validation_loss += validation_loss.item()
 
-            recorded_validation_error = running_validation_loss / (self.x_test.shape[-1])
+            recorded_validation_error = math.sqrt(running_validation_loss / (self.x_test.shape[-1]))
             if recorded_validation_error < lowest_error:
                 torch.save(self.model.state_dict(), self.saved_model_path)
                 lowest_error = recorded_validation_error
@@ -360,17 +391,21 @@ class RunTCN:
             else:
                 cut_off_counter += 1
 
-            # STOP THE MODEL WHEN IT IS NO LONGER LEARNING
             if cut_off_counter > 2:
                 if lr == 0.0001:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00005, betas=(0.9, 0.999))
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.00001)
                     print("optimizer updated to version 2")
                     cut_off_counter = 0
                     lr = 0.00005
                 elif lr == 0.00005:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.0001)
                     cut_off_counter = 0
                     print("optimizer updated to version 3")
                     lr = 0.00001
+                elif lr == 0.00001:
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.001)
+                    cut_off_counter = 0
+                    print("optimizer updated to version final")
+                    lr = 0.000001
                 else:
                     break
