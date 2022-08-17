@@ -50,10 +50,6 @@ x_train, x_test, y_train, y_test = CNNLSTMDataPrep(training_signals, training_la
                                                    training_size=0.85, lstm_sequences=False, split_data=True,
                                                    shuffle_full_dataset=False).prepped_data
 
-
-x_train = x_train[:, :, :, 0:100]
-y_train = y_train[:, :, 0:100]
-
 RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=80, saved_model_name='TCN_Test', angle_range=90)
 # RunningModel = RunConvLSTM(x_train, y_train, x_test, y_test, n_channels=15, lstm_hidden=64, epochs=80,
 #                            saved_model_name='ConvLSTM_Test', lstm_layers=2)

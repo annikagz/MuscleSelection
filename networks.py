@@ -37,8 +37,7 @@ class CNNLSTMDataPrep:
         self.sequence_length = sequence_length  # corresponds to the number of windows per sequence
         self.training_size = training_size
 
-        # NORMALISE THE SIGNAL -----------------------------------------------------------------------------------------
-        self.EMG_signals = normalise_signals(self.EMG_signals)
+
 
         # WINDOW THE SIGNAL --------------------------------------------------------------------------------------------
         self.windowed_signals, self.windowed_labels = split_signals_into_TCN_windows\
@@ -69,6 +68,11 @@ class CNNLSTMDataPrep:
             # y train of shape (sequence_length, n_channels, n_training_sequences)
             # x test of shape (sequence_length, n_channels, window_length, n_testing_sequences)
             # y test of shape (sequence_length, n_channels, n_testing_sequences)
+
+            # NORMALISE THE SIGNAL -------------------------------------------------------------------------------------
+            # THIS NEEDS TO BE ONCE THE DATA HAS ALREADY BEEN SPLIT SO THAT THERE IS NO INFORMATION LEAKAGE BETWEEN THE
+            # TRAINING AND TESTING SETS
+            self.x_train, self.x_test = normalise_signals(self.x_train, self.x_test)
 
             # SHUFFLE ALONG THE N_SEQUENCE AXIS ------------------------------------------------------------------------
             self.x_train, self.y_train = shuffle(self.x_train, self.y_train)
