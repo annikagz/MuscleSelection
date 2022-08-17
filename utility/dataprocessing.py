@@ -103,6 +103,11 @@ def split_into_train_test(signals, labels, train_size, split_axis):
         x_test = x_test.transpose((2, 1, 0))
         y_train = y_train.transpose((1, 0))
         y_test = y_test.transpose((1, 0))
+    elif signals.ndim == 2:
+        if split_axis == -1:
+            signals = signals.transpose((2, 0, 1))
+            labels = labels.transpose((1, 0))
+        x_train, x_test, y_train, y_test = train_test_split(signals, labels, train_size=train_size, shuffle=False)
     else:
         raise ValueError('Your input arrays have the wrong shape.')
     return x_train, x_test, y_train, y_test

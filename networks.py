@@ -27,9 +27,9 @@ class CNNLSTMDataPrep:
     """
     def __init__(self, EMG_signals, labels, window_length, window_step, batch_size, sequence_length=10, label_delay=0,
                  training_size=0.9, lstm_sequences=True, split_data=True, shuffle_full_dataset=True):
-        self.EMG_signals = EMG_signals
-        self.labels = labels
-        self.n_channels = self.EMG_signals.shape[-1]
+        # self.EMG_signals = EMG_signals
+        # self.labels = labels
+        # self.n_channels = self.EMG_signals.shape[-1]
         self.window_length = window_length
         self.window_step = window_step
         self.prediction_delay = label_delay
@@ -37,33 +37,10 @@ class CNNLSTMDataPrep:
         self.sequence_length = sequence_length  # corresponds to the number of windows per sequence
         self.training_size = training_size
 
-
-
-        # WINDOW THE SIGNAL --------------------------------------------------------------------------------------------
-        self.windowed_signals, self.windowed_labels = split_signals_into_TCN_windows\
-            (self.EMG_signals, self.labels, self.window_length, self.window_step, self.prediction_delay, False)
-        # windowed signals of shape (window_length, n_channels, n_reps)
-        # windowed labels of shape (n_channels, n_reps)
-
-        if lstm_sequences:  # ==========================================================================================
-            # GROUP INTO SEQUENCES -------------------------------------------------------------------------------------
-            self.windowed_signals, self.windowed_labels = group_windows_into_sequences\
-                (self.windowed_signals, self.windowed_labels, self.sequence_length, window_axis=-1)
-            # windowed signals of shape (n_windows_per_sequence, window_length, n_channels, n_sequences)
-            # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
-
-            # TRANSPOSE ------------------------------------------------------------------------------------------------
-            self.windowed_signals = self.windowed_signals.transpose((0, 2, 1, 3))
-            # windowed signals of shape (n_windows_per_sequence, n_channels, window_length, n_sequences)
-            # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
-
-        if shuffle_full_dataset:  # ====================================================================================
-            self.windowed_signals, self.windowed_labels = shuffle(self.windowed_signals, self.windowed_labels)
-
         if split_data:  # ==============================================================================================
             # SPLIT INTO TRAIN-TEST ------------------------------------------------------------------------------------
             self.x_train, self.x_test, self.y_train, self.y_test = split_into_train_test\
-                (self.windowed_signals, self.windowed_labels, train_size=self.training_size, split_axis=-1)
+                (EMG_signals, labels, train_size=self.training_size, split_axis=0)
             # x train of shape (sequence_length, n_channels, window_length, n_training_sequences)
             # y train of shape (sequence_length, n_channels, n_training_sequences)
             # x test of shape (sequence_length, n_channels, window_length, n_testing_sequences)
@@ -73,6 +50,29 @@ class CNNLSTMDataPrep:
             # THIS NEEDS TO BE ONCE THE DATA HAS ALREADY BEEN SPLIT SO THAT THERE IS NO INFORMATION LEAKAGE BETWEEN THE
             # TRAINING AND TESTING SETS
             self.x_train, self.x_test = normalise_signals(self.x_train, self.x_test)
+
+            # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
+            self.x_train, self.y_train = split_signals_into_TCN_windows(self.x_train, self.y_train, self.window_length,
+                                                                        self.window_step, self.prediction_delay, False)
+            self.x_test, self.y_test = split_signals_into_TCN_windows(self.x_test, self.y_test, self.window_length,
+                                                                      self.window_step, self.prediction_delay, False)
+            # windowed signals of shape (window_length, n_channels, n_reps)
+            # windowed labels of shape (n_channels, n_reps)
+
+            if lstm_sequences:  # ======================================================================================
+                # GROUP INTO SEQUENCES ---------------------------------------------------------------------------------
+                self.x_train, self.y_train = group_windows_into_sequences(self.x_train, self.y_train,
+                                                                          self.sequence_length, window_axis=-1)
+                self.x_test, self.y_test = group_windows_into_sequences(self.x_test, self.y_test,
+                                                                        self.sequence_length, window_axis=-1)
+                # windowed signals of shape (n_windows_per_sequence, window_length, n_channels, n_sequences)
+                # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
+
+                # TRANSPOSE --------------------------------------------------------------------------------------------
+                self.x_train = self.x_train.transpose((0, 2, 1, 3))
+                self.x_test = self.x_test.transpose((0, 2, 1, 3))
+                # windowed signals of shape (n_windows_per_sequence, n_channels, window_length, n_sequences)
+                # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
 
             # SHUFFLE ALONG THE N_SEQUENCE AXIS ------------------------------------------------------------------------
             self.x_train, self.y_train = shuffle(self.x_train, self.y_train)
@@ -85,12 +85,33 @@ class CNNLSTMDataPrep:
             # y train of shape (sequence_length, batch_size, n_channels, n_batches)
             # x test of shape (sequence_length, 1, n_channels, window_length, n_testing_sequences)
             # y test of shape (sequence_length, 1, 1, n_testing_sequences)
+            self.x_train = self.x_train.transpose((0, 2, 1, 3))
+            self.x_test = self.x_test.transpose((0, 2, 1, 3))
+
+        else:
+            # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
+            self.windowed_signals, self.windowed_labels = split_signals_into_TCN_windows\
+                (EMG_signals, labels, self.window_length, self.window_step, self.prediction_delay, False)
+            # windowed signals of shape (window_length, n_channels, n_reps)
+            # windowed labels of shape (n_channels, n_reps)
+
+            if lstm_sequences:  # ======================================================================================
+                # GROUP INTO SEQUENCES ---------------------------------------------------------------------------------
+                self.windowed_signals, self.windowed_labels = group_windows_into_sequences\
+                    (self.windowed_signals, self.windowed_labels, self.sequence_length, window_axis=-1)
+                # windowed signals of shape (n_windows_per_sequence, window_length, n_channels, n_sequences)
+                # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
+
+                # TRANSPOSE --------------------------------------------------------------------------------------------
+                self.windowed_signals = self.windowed_signals.transpose((0, 2, 1, 3))
+                # windowed signals of shape (n_windows_per_sequence, n_channels, window_length, n_sequences)
+                # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
 
         # TURN INTO TENSORS --------------------------------------------------------------------------------------------
         self.turn_into_tensors()
 
-        # PRODUCE A FINAL ATTRIBUTE WITH ALL THE RELEVANT INFORMATION TO BE EASILY EXTRACTED ---------------------------
-        self.prepped_data = self.x_train, self.x_test, self.y_train, self.y_test
+        # # PRODUCE A FINAL ATTRIBUTE WITH ALL THE RELEVANT INFORMATION TO BE EASILY EXTRACTED ---------------------------
+        # self.prepped_data = self.x_train, self.x_test, self.y_train, self.y_test
 
     def turn_into_tensors(self):
         self.x_train = torch.autograd.Variable(torch.from_numpy(self.x_train), requires_grad=True)
@@ -395,21 +416,18 @@ class RunTCN:
             else:
                 cut_off_counter += 1
 
-            if cut_off_counter > 2:
+            if cut_off_counter > 3:
                 if lr == 0.0001:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.00001)
-                    print("optimizer updated to version 2")
-                    cut_off_counter = 0
-                    lr = 0.00005
+                    for g in optimizer.param_groups:
+                        g['lr'] = 0.0005
+                        lr = 0.0005
                 elif lr == 0.00005:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.0001)
-                    cut_off_counter = 0
-                    print("optimizer updated to version 3")
+                    for g in optimizer.param_groups:
+                        g['lr'] = 0.0001
                     lr = 0.00001
                 elif lr == 0.00001:
-                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.001)
-                    cut_off_counter = 0
-                    print("optimizer updated to version final")
+                    for g in optimizer.param_groups:
+                        g['lr'] = 0.000001
                     lr = 0.000001
                 else:
                     break
