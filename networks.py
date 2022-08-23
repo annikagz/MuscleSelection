@@ -1,4 +1,5 @@
 import math
+import statistics
 
 import torch.nn as nn
 import torch
@@ -9,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utility.dataprocessing import split_signals_into_TCN_windows, group_windows_into_sequences, shuffle, \
     split_into_train_test, split_into_batches
 from utility.conversions import normalise_signals
+import time
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -37,10 +39,18 @@ class CNNLSTMDataPrep:
         self.sequence_length = sequence_length  # corresponds to the number of windows per sequence
         self.training_size = training_size
 
+        # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
+        self.EMG_signals, self.labels = split_signals_into_TCN_windows(EMG_signals, labels, self.window_length,
+                                                                       self.window_step, self.prediction_delay, False)
+
+        if shuffle_full_dataset:
+            # SHUFFLE ALONG THE N_SEQUENCE AXIS ------------------------------------------------------------------------
+            self.EMG_signals, self.labels = shuffle(self.EMG_signals, self.labels)
+
         if split_data:  # ==============================================================================================
             # SPLIT INTO TRAIN-TEST ------------------------------------------------------------------------------------
             self.x_train, self.x_test, self.y_train, self.y_test = split_into_train_test\
-                (EMG_signals, labels, train_size=self.training_size, split_axis=0)
+                (self.EMG_signals, self.labels, train_size=self.training_size, split_axis=-1)
             # x train of shape (sequence_length, n_channels, window_length, n_training_sequences)
             # y train of shape (sequence_length, n_channels, n_training_sequences)
             # x test of shape (sequence_length, n_channels, window_length, n_testing_sequences)
@@ -49,15 +59,13 @@ class CNNLSTMDataPrep:
             # NORMALISE THE SIGNAL -------------------------------------------------------------------------------------
             # THIS NEEDS TO BE ONCE THE DATA HAS ALREADY BEEN SPLIT SO THAT THERE IS NO INFORMATION LEAKAGE BETWEEN THE
             # TRAINING AND TESTING SETS
-            self.x_train, self.x_test = normalise_signals(self.x_train, self.x_test)
-
-            # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
-            self.x_train, self.y_train = split_signals_into_TCN_windows(self.x_train, self.y_train, self.window_length,
-                                                                        self.window_step, self.prediction_delay, False)
-            self.x_test, self.y_test = split_signals_into_TCN_windows(self.x_test, self.y_test, self.window_length,
-                                                                      self.window_step, self.prediction_delay, False)
-            # windowed signals of shape (window_length, n_channels, n_reps)
-            # windowed labels of shape (n_channels, n_reps)
+            for channel in range(self.x_train.shape[0]):
+                if np.all(self.x_train[channel, :, :]) != 0:
+                    average = np.mean(self.x_train[channel, :, :])
+                    std = np.std(self.x_train[channel, :, :], dtype=np.float64)
+                    self.x_train[channel, :, :] = (self.x_train[channel, :, :] - average) / std
+                    self.x_test[channel, :, :] = (self.x_test[channel, :, :] - average) / std
+            # self.x_train, self.x_test = normalise_signals(self.x_train, self.x_test)
 
             if lstm_sequences:  # ======================================================================================
                 # GROUP INTO SEQUENCES ---------------------------------------------------------------------------------
@@ -81,12 +89,11 @@ class CNNLSTMDataPrep:
             self.x_train, self.y_train, self.x_test, self.y_test = split_into_batches(self.x_train, self.y_train,
                                                                                       self.x_test, self.y_test,
                                                                                       self.batch_size, batch_axis=0)
+
             # x train of shape (sequence_length, batch_size, n_channels, window_length, n_batches)
             # y train of shape (sequence_length, batch_size, n_channels, n_batches)
             # x test of shape (sequence_length, 1, n_channels, window_length, n_testing_sequences)
             # y test of shape (sequence_length, 1, 1, n_testing_sequences)
-            self.x_train = self.x_train.transpose((0, 2, 1, 3))
-            self.x_test = self.x_test.transpose((0, 2, 1, 3))
 
         else:
             # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
@@ -110,12 +117,12 @@ class CNNLSTMDataPrep:
         # TURN INTO TENSORS --------------------------------------------------------------------------------------------
         self.turn_into_tensors()
 
-        # # PRODUCE A FINAL ATTRIBUTE WITH ALL THE RELEVANT INFORMATION TO BE EASILY EXTRACTED ---------------------------
-        # self.prepped_data = self.x_train, self.x_test, self.y_train, self.y_test
+        # PRODUCE A FINAL ATTRIBUTE WITH ALL THE RELEVANT INFORMATION TO BE EASILY EXTRACTED ---------------------------
+        self.prepped_data = self.x_train, self.y_train, self.x_test, self.y_test
 
     def turn_into_tensors(self):
-        self.x_train = torch.autograd.Variable(torch.from_numpy(self.x_train), requires_grad=True)
-        self.y_train = torch.autograd.Variable(torch.from_numpy(self.y_train), requires_grad=True)
+        self.x_train = torch.autograd.Variable(torch.from_numpy(self.x_train), requires_grad=False)
+        self.y_train = torch.autograd.Variable(torch.from_numpy(self.y_train), requires_grad=False)
         self.x_test = torch.from_numpy(self.x_test)
         self.y_test = torch.from_numpy(self.y_test)
 
@@ -307,10 +314,11 @@ class TempConvNetwork(nn.Module):
         super(TempConvNetwork, self).__init__()
         # Here, define each layer with their inputs, for example:
         self.input_size = n_inputs
-        self.flattened_length = 992
+        self.flattened_length = 960
         self.angle_range = angle_range
 
         self.TCN = nn.Sequential(
+            # nn.BatchNorm1d(self.input_size),
             nn.Conv1d(in_channels=self.input_size, out_channels=16, kernel_size=kernel_size, stride=stride,
                       dilation=dilation, padding='same'),  # (1, 8, 512)
             nn.LeakyReLU(),
@@ -319,18 +327,18 @@ class TempConvNetwork(nn.Module):
                       padding='same'),
             nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 16, 128)
-            nn.Conv1d(in_channels=32, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
+            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
             nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),  # (1, 16, 64)
-            nn.Conv1d(in_channels=32, out_channels=32, kernel_size=kernel_size, stride=stride, dilation=dilation,
+            nn.Conv1d(in_channels=64, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding='same'),
             nn.LeakyReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2),
-            # nn.Conv1d(in_channels=64, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
-            #           padding='same'),
-            # nn.ReLU(),
-            # nn.MaxPool1d(kernel_size=3, stride=2),
+            nn.Conv1d(in_channels=64, out_channels=64, kernel_size=kernel_size, stride=stride, dilation=dilation,
+                      padding='same'),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2),
             nn.Flatten(),  # (1, 1024)
             nn.Linear(int(self.flattened_length), int(self.flattened_length / 2)),  # (1, 512)
             nn.ReLU(),
@@ -355,12 +363,14 @@ class TempConvNetwork(nn.Module):
 
 
 class RunTCN:
-    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range):
+    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range, load_model=False):
 
         self.model = TempConvNetwork(n_inputs=n_channels, kernel_size=5, stride=1, dilation=4, dropout=0.4, angle_range=angle_range).to(device)
         self.model_type = 'TCN'
         self.saved_model_name = saved_model_name
         self.saved_model_path = '/media/ag6016/Storage/MuscleSelection/Models/' + self.saved_model_name + '.pth'
+        if load_model:
+            self.model.load_state_dict(torch.load(self.saved_model_path))
         self.criterion = nn.MSELoss().to(device)
         self.epochs = epochs
         self.writer = SummaryWriter()
@@ -376,15 +386,13 @@ class RunTCN:
         rep_step = 0
         lowest_error = 1000.0
         cut_off_counter = 0
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.000001)
-        lr = 0.0001
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, betas=(0.9, 0.999))
+        lr = 0.001
         for epoch in range(self.epochs):
             print("Epoch number:", epoch)
             running_training_loss = 0.0
             running_validation_loss = 0.0
-
             for rep in tqdm(np.arange(self.x_train.shape[-1])):
-                #torch.cuda.empty_cache()
                 x_train = self.x_train[:, :, :, rep].to(device)
                 y_train = self.y_train[:, :, rep].to(device)
                 predicted = self.model.forward(EMG_signal=x_train.float())
@@ -392,11 +400,10 @@ class RunTCN:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                self.writer.add_scalar("Training loss " + self.saved_model_name, loss, global_step=rep_step)
                 running_training_loss += loss.item()
                 rep_step += 1
             recorded_training_error = math.sqrt(running_training_loss / (self.x_train.shape[-1]))
-
+            self.writer.add_scalar("Epoch training loss ", recorded_training_error, global_step=epoch)
             # VALIDATION LOOP
             with torch.no_grad():
                 for rep in range(self.x_test.shape[-1]):
@@ -405,29 +412,53 @@ class RunTCN:
                     predicted = self.model.forward(EMG_signal=x_test.float())
                     validation_loss = self.criterion(predicted, y_test.float())
                     running_validation_loss += validation_loss.item()
-
             recorded_validation_error = math.sqrt(running_validation_loss / (self.x_test.shape[-1]))
+            self.writer.add_scalar("Epoch val loss ", recorded_validation_error, global_step=epoch)
             if recorded_validation_error < lowest_error:
                 torch.save(self.model.state_dict(), self.saved_model_path)
                 lowest_error = recorded_validation_error
                 self.recorded_validation_error = recorded_validation_error
                 self.recorded_training_error = recorded_training_error
                 self.epochs_ran = epoch
+                cut_off_counter = 0
+                print("it's lower")
             else:
                 cut_off_counter += 1
-
-            if cut_off_counter > 3:
-                if lr == 0.0001:
-                    for g in optimizer.param_groups:
-                        g['lr'] = 0.0005
-                        lr = 0.0005
-                elif lr == 0.00005:
-                    for g in optimizer.param_groups:
-                        g['lr'] = 0.0001
-                    lr = 0.00001
-                elif lr == 0.00001:
-                    for g in optimizer.param_groups:
-                        g['lr'] = 0.000001
-                    lr = 0.000001
-                else:
-                    break
+            if cut_off_counter > 15 and lr == 0.001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.0001
+                print("update of lr number 1")
+            elif cut_off_counter > 15 and lr == 0.0001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.00001
+                print("update of lr number 2")
+            elif cut_off_counter > 15 and lr == 0.00001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.000001
+                print("update of lr number 3")
+            elif cut_off_counter > 15 and lr == 0.000001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0000001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.0000001
+                print("update of lr number 4")
+            elif cut_off_counter > 15 and lr == 0.0000001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00000001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.00000001
+                print("update of lr number 5")
+            elif cut_off_counter > 15 and lr == 0.00000001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000000001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.000000001
+                print("update of lr number 6")
+            if cut_off_counter > 10:
+                break

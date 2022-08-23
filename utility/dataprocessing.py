@@ -4,6 +4,7 @@ import numpy as np
 import c3d
 import pandas as pd
 import matplotlib.pyplot as plt
+import torch
 from sklearn.model_selection import train_test_split
 from utility.conversions import upsample_based_on_axis
 
@@ -39,6 +40,7 @@ def extract_c3d_data_to_hdf5(list_of_subjects, list_of_speeds):
 
 def extract_hdf5_data_to_EMG_and_labels(subject, speed, list_of_muscles, label_name):
     data = pd.read_hdf('/media/ag6016/Storage/MuscleSelection/full_data/' + subject + '_' + speed + '.h5', key='Data')
+    # data = pd.read_hdf(subject + '_' + speed + '.h5', key='Data')
     EMG_signals = data[list_of_muscles].to_numpy()
     label = np.expand_dims(data[label_name].to_numpy(), axis=1)
     return EMG_signals, label
@@ -151,4 +153,7 @@ def split_into_batches(x_train, y_train, x_test, y_test, batch_size, batch_axis=
     else:
         raise ValueError('The input dimensions of the array are wrong')
     return x_train, y_train, x_test, y_test
+
+
+
 
