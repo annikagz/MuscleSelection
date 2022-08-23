@@ -424,41 +424,43 @@ class RunTCN:
                 print("it's lower")
             else:
                 cut_off_counter += 1
-            if cut_off_counter > 15 and lr == 0.001:
+            if cut_off_counter > 10 and lr == 0.001:
                 optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
                 self.model.load_state_dict(torch.load(self.saved_model_path))
                 cut_off_counter = 0
                 lr = 0.0001
                 print("update of lr number 1")
-            elif cut_off_counter > 15 and lr == 0.0001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
-                self.model.load_state_dict(torch.load(self.saved_model_path))
-                cut_off_counter = 0
-                lr = 0.00001
-                print("update of lr number 2")
-            elif cut_off_counter > 15 and lr == 0.00001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
-                self.model.load_state_dict(torch.load(self.saved_model_path))
-                cut_off_counter = 0
-                lr = 0.000001
-                print("update of lr number 3")
-            elif cut_off_counter > 15 and lr == 0.000001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0000001, betas=(0.9, 0.999))
-                self.model.load_state_dict(torch.load(self.saved_model_path))
-                cut_off_counter = 0
-                lr = 0.0000001
-                print("update of lr number 4")
-            elif cut_off_counter > 15 and lr == 0.0000001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00000001, betas=(0.9, 0.999))
-                self.model.load_state_dict(torch.load(self.saved_model_path))
-                cut_off_counter = 0
-                lr = 0.00000001
-                print("update of lr number 5")
-            elif cut_off_counter > 15 and lr == 0.00000001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000000001, betas=(0.9, 0.999))
-                self.model.load_state_dict(torch.load(self.saved_model_path))
-                cut_off_counter = 0
-                lr = 0.000000001
-                print("update of lr number 6")
-            if cut_off_counter > 10:
+            elif cut_off_counter > 5 and lr == 0.0001:
                 break
+            #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
+            #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            #     cut_off_counter = 0
+            #     lr = 0.00001
+            #     print("update of lr number 2")
+            # elif cut_off_counter > 5 and lr == 0.00001:
+            #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
+            #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            #     cut_off_counter = 0
+            #     lr = 0.000001
+            #     print("update of lr number 3")
+            # elif cut_off_counter > 5 and lr == 0.000001:
+            #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0000001, betas=(0.9, 0.999))
+            #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            #     cut_off_counter = 0
+            #     lr = 0.0000001
+            #     print("update of lr number 4")
+            # # elif cut_off_counter > 5 and lr == 0.0000001:
+            # #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00000001, betas=(0.9, 0.999))
+            # #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            # #     cut_off_counter = 0
+            # #     lr = 0.00000001
+            # #     print("update of lr number 5")
+            # # elif cut_off_counter > 5 and lr == 0.00000001:
+            # #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000000001, betas=(0.9, 0.999))
+            # #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            # #     cut_off_counter = 0
+            # #     lr = 0.000000001
+            # #     print("update of lr number 6")
+            # # elif cut_off_counter > 5 and lr == 0.000000001:
+            # elif cut_off_counter > 5 and lr == 0.0000001:
+            #     break

@@ -124,13 +124,13 @@ class SelectionProcess:
 
     def train_model_with_all_channels(self):
         prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512, window_step=40,
-                                       batch_size=128, sequence_length=15, label_delay=0, training_size=0.95,
+                                       batch_size=128, sequence_length=15, label_delay=0, training_size=0.9,
                                        lstm_sequences=False, split_data=True, shuffle_full_dataset=True)
         x_train = prepped_data.x_train
         y_train = prepped_data.y_train
         y_test = prepped_data.y_test
         x_test = prepped_data.x_test
-        RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
+        RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=1,
                               saved_model_name='TCN_all_channels_' + self.subject, angle_range=90)
         RunningModel.train_network()
         self.performance_report = pd.DataFrame({'Number of channels': 15, 'Number of epochs': RunningModel.epochs_ran,
@@ -141,12 +141,14 @@ class SelectionProcess:
                                                                            torch.min(y_train).item())),
                                                 'Validation accuracy': 1 - (RunningModel.recorded_validation_error /
                                                                             (torch.max(y_test).item() -
-                                                                               torch.min(y_test).item())),
+                                                                             torch.min(y_test).item())),
                                                 'Electrode removed': 'None'}, index=[0])
 
     def train_with_one_drop_out(self):
         self.train_model_with_all_channels()
-        self.updated_training_signals = self.training_signals
+        self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
+                                       '_channel_selection_performance.csv')
+        self.updated_training_signals = self.training_signals.copy()
         counter = self.training_signals.shape[-1]
         while counter > 4:
             training_rmse = []
@@ -155,19 +157,20 @@ class SelectionProcess:
             for i in range(len(self.list_of_muscles)):
                 # set the column to 0 to drop-out one of the electrodes
                 if np.count_nonzero(self.updated_training_signals[:, i]) == 0:
-                    training_rmse.append(np.nan)
-                    validation_rmse.append(np.nan)
-                    epochs_ran.append(np.nan)
+                    training_rmse.append(999)
+                    validation_rmse.append(999)
+                    epochs_ran.append(999)
                 else:
-                    training_signals = self.updated_training_signals
-                    for val in range(training_signals.shape[0]):
-                        training_signals[val, i] = 0
-                    prepped_data = CNNLSTMDataPrep(self.updated_training_signals, self.training_labels,
+                    train_signals = self.updated_training_signals.copy()
+                    print(self.updated_training_signals[0, :])
+                    train_signals[:, i] = 0
+                    print("The training signals for this loop are ", train_signals[0, :])
+                    prepped_data = CNNLSTMDataPrep(train_signals, self.training_labels,
                                                    window_length=512, window_step=40, batch_size=128, sequence_length=15,
                                                    label_delay=0, training_size=0.9, lstm_sequences=False,
                                                    split_data=True, shuffle_full_dataset=True)
                     x_train, y_train, x_test, y_test = prepped_data.prepped_data
-                    RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
+                    RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=80,
                                           saved_model_name='TCN_' + self.subject + '_' + str(counter-1) +
                                                            '_electrodes_without_' + self.list_of_muscles[i],
                                           angle_range=90)
@@ -175,6 +178,10 @@ class SelectionProcess:
                     training_rmse.append(RunningModel.recorded_training_error)
                     validation_rmse.append(RunningModel.recorded_validation_error)
                     epochs_ran.append(RunningModel.epochs_ran)
+                    print(training_rmse)
+                    print(validation_rmse)
+                    print(epochs_ran)
+                    print("WE HAVE JUST FINISHED LOOP NUMBER ", i)
             new_row = pd.DataFrame([training_rmse], columns=self.general_report.columns, index=['Training error with ' + str(counter - 1) + ' electrodes'])
             self.general_report = pd.concat([self.general_report, new_row])
             new_row = pd.DataFrame([validation_rmse], columns=self.general_report.columns,
@@ -183,29 +190,27 @@ class SelectionProcess:
             new_row = pd.DataFrame([epochs_ran], columns=self.general_report.columns,
                                    index=['Epochs ran with ' + str(counter - 1) + ' electrodes'])
             self.general_report = pd.concat([self.general_report, new_row])
-
             electrode_to_remove = validation_rmse.index(min(validation_rmse))
-
+            print("The electrode to remove is ", electrode_to_remove)
             # we want to remove the electrode whose absence has the least impact on model accuracy
-            new_row = pd.DataFrame([[counter-1, epochs_ran, training_rmse[electrode_to_remove],
+            new_row = pd.DataFrame([[counter-1, epochs_ran[electrode_to_remove], training_rmse[electrode_to_remove],
                                     validation_rmse[electrode_to_remove], 1 - (training_rmse[electrode_to_remove] /
                                                                                (np.max(self.training_labels) -
                                                                                 np.min(self.training_labels))),
                                     1 - (validation_rmse[electrode_to_remove] / (np.max(self.training_labels) -
                                                                                  np.min(self.training_labels))),
                                     self.list_of_muscles[electrode_to_remove]]], columns=self.performance_report.columns)
-
             self.performance_report = pd.concat([self.performance_report, new_row], ignore_index=True)
             self.updated_training_signals[:, electrode_to_remove] = 0
             self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                           '_channel_selection.csv')
+                                           '_channel_selection_performance.csv')
             self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                       '_channel_ranking.csv')
+                                       '_channel_info.csv')
             counter -= 1
         self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                       '_channel_selection.csv')
+                                       '_channel_selection_performance.csv')
         self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                   '_channel_ranking.csv')
+                                   '_channel_info.csv')
 
 
 if __name__ == "__main__":
