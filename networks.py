@@ -39,6 +39,13 @@ class CNNLSTMDataPrep:
         self.sequence_length = sequence_length  # corresponds to the number of windows per sequence
         self.training_size = training_size
 
+        average_values = []
+        std_values = []
+        for channel in range(EMG_signals.shape[-1]):
+            average_values.append(np.mean(EMG_signals[:, channel]))
+            std_values.append(np.std(EMG_signals[:, channel], dtype=np.float64))
+        self.norm_values = average_values, std_values
+
         # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
         self.EMG_signals, self.labels = split_signals_into_TCN_windows(EMG_signals, labels, self.window_length,
                                                                        self.window_step, self.prediction_delay, False)
@@ -94,8 +101,18 @@ class CNNLSTMDataPrep:
             # y train of shape (sequence_length, batch_size, n_channels, n_batches)
             # x test of shape (sequence_length, 1, n_channels, window_length, n_testing_sequences)
             # y test of shape (sequence_length, 1, 1, n_testing_sequences)
+            self.turn_into_tensors()
+
+            # PRODUCE A FINAL ATTRIBUTE WITH ALL THE RELEVANT INFORMATION TO BE EASILY EXTRACTED ----------------------
+            self.prepped_data = self.x_train, self.y_train, self.x_test, self.y_test
 
         else:
+            average_values = []
+            std_values = []
+            for channel in range(self.EMG_signals.shape[0]):
+                average_values.append(np.mean(self.EMG_signals[channel, :, :]))
+                std_values.append(np.std(self.EMG_signals[channel, :, :], dtype=np.float64))
+            self.norm_values = average_values, std_values
             # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
             self.windowed_signals, self.windowed_labels = split_signals_into_TCN_windows\
                 (EMG_signals, labels, self.window_length, self.window_step, self.prediction_delay, False)
@@ -114,17 +131,19 @@ class CNNLSTMDataPrep:
                 # windowed signals of shape (n_windows_per_sequence, n_channels, window_length, n_sequences)
                 # windowed labels of shape (n_windows_per_sequence, n_channels, n_sequences)
 
-        # TURN INTO TENSORS --------------------------------------------------------------------------------------------
-        self.turn_into_tensors()
+            # TURN INTO TENSORS ----------------------------------------------------------------------------------------
+            # self.turn_into_tensors()
+            self.windowed_signals = torch.autograd.Variable(torch.from_numpy(self.windowed_signals), requires_grad=False)
+            self.windowed_labels = torch.autograd.Variable(torch.from_numpy(self.windowed_labels), requires_grad=False)
 
-        # PRODUCE A FINAL ATTRIBUTE WITH ALL THE RELEVANT INFORMATION TO BE EASILY EXTRACTED ---------------------------
-        self.prepped_data = self.x_train, self.y_train, self.x_test, self.y_test
+            self.prepped_windowed_data = self.windowed_signals, self.windowed_labels
 
     def turn_into_tensors(self):
         self.x_train = torch.autograd.Variable(torch.from_numpy(self.x_train), requires_grad=False)
         self.y_train = torch.autograd.Variable(torch.from_numpy(self.y_train), requires_grad=False)
         self.x_test = torch.from_numpy(self.x_test)
         self.y_test = torch.from_numpy(self.y_test)
+
 
 
 # CONVOLUTIONAL LSTM NETWORK ===========================================================================================
@@ -378,16 +397,16 @@ class RunTCN:
         self.y_train = y_train
         self.x_test = x_test
         self.y_test = y_test
-        self.recorded_training_error = None
-        self.recorded_validation_error = None
+        self.recorded_training_error = 100
+        self.recorded_validation_error = 100
         self.epochs_ran = 0
 
     def train_network(self):
         rep_step = 0
         lowest_error = 1000.0
         cut_off_counter = 0
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, betas=(0.9, 0.999))
-        lr = 0.001
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
+        lr = 0.00001
         for epoch in range(self.epochs):
             print("Epoch number:", epoch)
             running_training_loss = 0.0
@@ -397,11 +416,13 @@ class RunTCN:
                 y_train = self.y_train[:, :, rep].to(device)
                 predicted = self.model.forward(EMG_signal=x_train.float())
                 loss = self.criterion(predicted, y_train.float())
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 running_training_loss += loss.item()
                 rep_step += 1
+            print(loss.item())
             recorded_training_error = math.sqrt(running_training_loss / (self.x_train.shape[-1]))
             self.writer.add_scalar("Epoch training loss ", recorded_training_error, global_step=epoch)
             # VALIDATION LOOP
@@ -419,24 +440,27 @@ class RunTCN:
                 lowest_error = recorded_validation_error
                 self.recorded_validation_error = recorded_validation_error
                 self.recorded_training_error = recorded_training_error
+                print("The errors are ", self.recorded_training_error, self.recorded_validation_error)
                 self.epochs_ran = epoch
                 cut_off_counter = 0
                 print("it's lower")
             else:
                 cut_off_counter += 1
-            if cut_off_counter > 10 and lr == 0.001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
-                self.model.load_state_dict(torch.load(self.saved_model_path))
-                cut_off_counter = 0
-                lr = 0.0001
-                print("update of lr number 1")
-            elif cut_off_counter > 5 and lr == 0.0001:
-                break
+            # if epoch == 5:
             #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
             #     self.model.load_state_dict(torch.load(self.saved_model_path))
-            #     cut_off_counter = 0
-            #     lr = 0.00001
-            #     print("update of lr number 2")
+            if cut_off_counter > 5 and lr == 0.00001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.000001
+                print("update of lr number 1")
+            elif cut_off_counter > 5 and lr == 0.000001:
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0000001, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = 0.0000001
+                print("update of lr number 2")
             # elif cut_off_counter > 5 and lr == 0.00001:
             #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
             #     self.model.load_state_dict(torch.load(self.saved_model_path))
