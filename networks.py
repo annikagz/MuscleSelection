@@ -382,7 +382,7 @@ class TempConvNetwork(nn.Module):
 
 
 class RunTCN:
-    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range, load_model=False):
+    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range, load_model=False, initial_lr=0.001):
 
         self.model = TempConvNetwork(n_inputs=n_channels, kernel_size=5, stride=1, dilation=4, dropout=0.4, angle_range=angle_range).to(device)
         self.model_type = 'TCN'
@@ -397,6 +397,8 @@ class RunTCN:
         self.y_train = y_train
         self.x_test = x_test
         self.y_test = y_test
+        self.initial_lr = initial_lr
+        self.updated_lr = None
         self.recorded_training_error = 100
         self.recorded_validation_error = 100
         self.epochs_ran = 0
@@ -405,8 +407,8 @@ class RunTCN:
         rep_step = 0
         lowest_error = 1000.0
         cut_off_counter = 0
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
-        lr = 0.00001
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.initial_lr, betas=(0.9, 0.999))
+        lr = self.initial_lr
         for epoch in range(self.epochs):
             print("Epoch number:", epoch)
             running_training_loss = 0.0
@@ -446,21 +448,43 @@ class RunTCN:
                 print("it's lower")
             else:
                 cut_off_counter += 1
-            # if epoch == 5:
-            #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001, betas=(0.9, 0.999))
-            #     self.model.load_state_dict(torch.load(self.saved_model_path))
-            if cut_off_counter > 5 and lr == 0.00001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
+
+            if cut_off_counter > 3 and lr == self.initial_lr:
+                self.updated_lr = self.initial_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
                 self.model.load_state_dict(torch.load(self.saved_model_path))
                 cut_off_counter = 0
-                lr = 0.000001
+                lr = self.updated_lr
                 print("update of lr number 1")
-            elif cut_off_counter > 5 and lr == 0.000001:
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0000001, betas=(0.9, 0.999))
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
                 self.model.load_state_dict(torch.load(self.saved_model_path))
                 cut_off_counter = 0
-                lr = 0.0000001
+                lr = self.updated_lr
                 print("update of lr number 2")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 3")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 4")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 5")
+
             # elif cut_off_counter > 5 and lr == 0.00001:
             #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000001, betas=(0.9, 0.999))
             #     self.model.load_state_dict(torch.load(self.saved_model_path))
@@ -473,18 +497,18 @@ class RunTCN:
             #     cut_off_counter = 0
             #     lr = 0.0000001
             #     print("update of lr number 4")
-            # # elif cut_off_counter > 5 and lr == 0.0000001:
-            # #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00000001, betas=(0.9, 0.999))
-            # #     self.model.load_state_dict(torch.load(self.saved_model_path))
-            # #     cut_off_counter = 0
-            # #     lr = 0.00000001
-            # #     print("update of lr number 5")
-            # # elif cut_off_counter > 5 and lr == 0.00000001:
-            # #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000000001, betas=(0.9, 0.999))
-            # #     self.model.load_state_dict(torch.load(self.saved_model_path))
-            # #     cut_off_counter = 0
-            # #     lr = 0.000000001
-            # #     print("update of lr number 6")
-            # # elif cut_off_counter > 5 and lr == 0.000000001:
             # elif cut_off_counter > 5 and lr == 0.0000001:
-            #     break
+            #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00000001, betas=(0.9, 0.999))
+            #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            #     cut_off_counter = 0
+            #     lr = 0.00000001
+            #     print("update of lr number 5")
+            # elif cut_off_counter > 5 and lr == 0.00000001:
+            #     optimizer = torch.optim.Adam(self.model.parameters(), lr=0.000000001, betas=(0.9, 0.999))
+            #     self.model.load_state_dict(torch.load(self.saved_model_path))
+            #     cut_off_counter = 0
+            #     lr = 0.000000001
+            #     print("update of lr number 6")
+            # elif cut_off_counter > 5 and lr == 0.000000001:
+            elif cut_off_counter > 5 and lr == 0.0000001:
+                break

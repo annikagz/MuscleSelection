@@ -15,9 +15,136 @@ from networks import RunConvLSTM, CNNLSTMDataPrep, RunTCN
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
+class PCAEvaluation:
+    """
+    For this class, we want to evaluate the muscle groups that were selected by the PCA and then save the values into a
+    dataframe
+    1) load the dataframe that contains the muscle groups, depending on whether we are looking at the max or the min
+    variance
+    2) Evaluate the performance of these muscle groups across different conditions:
+        a) Train on all steady-state speeds and test on transient
+        b) Train on faster speeds and test on slow speeds
+        c) Train on faster speeds and test on medium speeds
+    3) Record the value of all of these into some data frames under the folder Variance reports, recording both the
+    training RMSE and accuracy
+    """
+    def __init__(self, initial_lr, training_speeds, testing_speeds, batch_size, report_name, epochs, PCA_selection_used='max', reduce_testing_set=None):
+        self.initial_lr = initial_lr
+        self.training_speeds = training_speeds
+        self.testing_speeds = testing_speeds
+        self.batch_size = batch_size
+        self.report_name = report_name
+        self.epochs = epochs
+        self.PCA_type = PCA_selection_used
+        self.reduced_testing_set = reduce_testing_set
+        self.list_of_muscles = ["ESL-L", "ESL-R", "ESI-L", "ESI-R", "MF-L", "MF-R", "RF", "VM", "VL", "BF", "ST",
+                                "TA", "SO", "GM", "GL"]
+        self.recorded_rmse_report = None
+        self.recorded_acc_report = None
+        self.list_of_subjects = ['DS07']#['DS01', 'DS02', 'DS04', 'DS05', 'DS06', 'DS07']
+        self.evaluate_PCA_selection()
+
+    def evaluate_PCA_selection(self):
+        dominant_leg = {'DS01': 'R', 'DS02': 'L', 'DS03': 'R', 'DS04': 'L', 'DS05': 'R', 'DS06': 'R', 'DS07': 'L'}
+        list_joint_angles = ["HipAngles", "KneeAngles", "AnkleAngles"]
+        PCA_selected_muscles = pd.read_csv('/media/ag6016/Storage/MuscleSelection/VarianceReports/'
+                                           'PCA_' + self.PCA_type + '_var_selection.csv')
+        report_idx = list(PCA_selected_muscles.index.values)
+        recorded_idx = ['2 muscles', '3 muscles', '4 muscles', '5 muscles']
+        recorded_PCA_rmse_values = pd.DataFrame(columns=PCA_selected_muscles.head(),
+                                                index=['2 muscles', '3 muscles', '4 muscles', '5 muscles'])
+        recorded_PCA_acc_values = pd.DataFrame(columns=PCA_selected_muscles.head(),
+                                               index=['2 muscles', '3 muscles', '4 muscles', '5 muscles'])
+        for subject in self.list_of_subjects:
+            label_name = str(dominant_leg[subject]) + str(list_joint_angles[1])
+            if subject == 'DS07':
+                eliminate_speeds = ['07', '08']
+                training_speeds = [speed for speed in self.training_speeds if speed not in eliminate_speeds]
+                testing_speeds = [speed for speed in self.testing_speeds if speed not in eliminate_speeds]
+            else:
+                training_speeds = self.training_speeds
+                testing_speeds = self.testing_speeds
+
+            training_signals = []
+            training_labels = []
+            testing_signals = []
+            testing_labels = []
+            for i in range(len(training_speeds)):
+                EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(subject, training_speeds[i],
+                                                                          self.list_of_muscles, label_name=label_name)
+                training_signals.append(EMG_signals)
+                training_labels.append(labels)
+            training_signals = np.concatenate(training_signals, axis=0)
+            training_labels = np.concatenate(training_labels, axis=0)
+            print("Training signals shape is ", training_signals.shape, training_labels.shape)
+            for i in range(len(testing_speeds)):
+                EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(subject, testing_speeds[i],
+                                                                          self.list_of_muscles,
+                                                                          label_name=label_name)
+                testing_signals.append(EMG_signals)
+                testing_labels.append(labels)
+            testing_signals = np.concatenate(testing_signals, axis=0)
+            testing_labels = np.concatenate(testing_labels, axis=0)
+            print("Testing signals shape is ", testing_signals.shape, testing_labels.shape)
+
+            training_data = CNNLSTMDataPrep(training_signals, training_labels, window_length=512,
+                                            window_step=40, batch_size=self.batch_size, sequence_length=15,
+                                            label_delay=0,
+                                            training_size=0.99, lstm_sequences=False, split_data=True,
+                                            shuffle_full_dataset=True)
+            x_train, y_train, _, _ = training_data.prepped_data  # shape (64, 15, 512, 400) and (64, 1, 400)
+
+            average_values, std_values = training_data.norm_values
+            testing_data = CNNLSTMDataPrep(testing_signals, testing_labels, window_length=512,
+                                           window_step=40, batch_size=1, sequence_length=15, label_delay=0,
+                                           training_size=0.99, lstm_sequences=False, split_data=True,
+                                           shuffle_full_dataset=True)
+            x_test, y_test, _, _ = testing_data.prepped_data
+            for channel in range(x_train.shape[1]):
+                x_train[:, channel, :, :] = torch.div((torch.sub(x_train[:, channel, :, :], average_values[channel])),
+                                                   std_values[channel])
+                x_test[:, channel, :, :] = torch.div((torch.sub(x_test[:, channel, :, :], average_values[channel])),
+                                                  std_values[channel])
+            if self.reduced_testing_set is not None:
+                cut_off = int(x_test.shape[-1] / self.reduced_testing_set)
+                x_test = x_test[:, :, :, 0:cut_off]
+                y_test = y_test[:, :, 0:cut_off]
+            for i in range(len(report_idx)):
+                muscles_to_keep = PCA_selected_muscles.loc[report_idx[i], subject]
+                muscles_to_keep_idx = [idx for idx, muscle in enumerate(self.list_of_muscles) if muscle in muscles_to_keep]
+                updated_x_train = x_train.clone()
+                updated_x_test = x_test.clone()
+                for channel in range(x_train.shape[1]):
+                    if channel in muscles_to_keep_idx:
+                        pass
+                    else:
+                        updated_x_train[:, channel, :, :] = 0
+                        updated_x_test[:, channel, :, :] = 0
+                RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=self.epochs,
+                                      saved_model_name='recent_PCA_evaluation', angle_range=90,
+                                      initial_lr=self.initial_lr)
+                RunningModel.train_network()
+                recorded_PCA_rmse_values.loc[recorded_idx[i], subject] = RunningModel.recorded_validation_error
+                recorded_PCA_acc_values.loc[recorded_idx[i], subject] = 1 - (RunningModel.recorded_validation_error /
+                                                                       (torch.max(y_test).item() -
+                                                                        torch.min(y_test).item()))
+                self.recorded_rmse_report = recorded_PCA_rmse_values
+                self.recorded_acc_report = recorded_PCA_acc_values
+                print(self.recorded_rmse_report)
+                print(self.recorded_acc_report)
+                input("CHECK")
+
+        self.recorded_rmse_report.to_csv('/media/ag6016/Storage/MuscleSelection/VarianceReports/PCA_RMSE_evaluation_' +
+                                         self.PCA_type + '_' + self.report_name + '.csv')
+        self.recorded_acc_report.to_csv('/media/ag6016/Storage/MuscleSelection/VarianceReports/PCA_acc_evaluation_' +
+                                        self.PCA_type + '_' + self.report_name + '.csv')
+
+
+
 class SelectionProcess:
     """
-    The point of this algorithm is to train the network and then implement a one-out process to try and remove the electrodes one by one until there are only 4 left.
+    The point of this algorithm is to train the network and then implement a one-out process to try and remove the
+    electrodes one by one until there are only 4 left.
     To do this, we must:
     1) Record the overall accuracy of the network with all the electrodes
     2) Have a list of the electrodes names
@@ -27,8 +154,11 @@ class SelectionProcess:
     6) Retain the order in which the electrodes were removed
     6) Repeat the process until all the subjects have been done
     """
-    def __init__(self, subject, label_name, reserved_fraction=0.05, training_speeds=None, testing_speeds=None, saved_graph_name=None, batch_size=128, epochs=45):
-        self.list_of_speeds = ['07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', 'R']
+    def __init__(self, subject, label_name, initial_lr, reserved_fraction=0.05, training_speeds=None, testing_speeds=None, saved_graph_name=None, batch_size=128, epochs=45, reduce_testing_set=None):
+        if subject == 'DS07':
+            self.list_of_speeds = ['09', '10', '11', '12', '13', '14', '15', '16', '17', '18', 'R']
+        else:
+            self.list_of_speeds = ['07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', 'R']
         self.list_of_muscles = ["ESL-L", "ESL-R", "ESI-L", "ESI-R", "MF-L", "MF-R", "RF", "VM", "VL", "BF", "ST", "TA",
                                 "SO", "GM", "GL"]
         self.list_angles = list(["LHipAngles", "LKneeAngles", "LAnkleAngles", "RHipAngles", "RKneeAngles", "RAnkleAngles"])
@@ -40,6 +170,8 @@ class SelectionProcess:
         self.saved_name = saved_graph_name
         self.batch_size = batch_size
         self.epochs = epochs
+        self.initial_lr = initial_lr
+        self.reduced_test_set = reduce_testing_set
         self.training_signals = None
         self.updated_training_signals = None
         self.training_labels = None
@@ -66,7 +198,6 @@ class SelectionProcess:
         columns = ['Speed', 'Training RMSE', 'Validation RMSE', 'Training accuracy', 'Validation accuracy', 'Epochs ran']
         speed_performance_profiler = pd.DataFrame(columns=columns)
         for speed in self.list_of_speeds:
-            speed = self.list_of_speeds[8]
             EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(self.subject, speed, self.list_of_muscles,
                                                                       label_name=self.label_name)
             prepped_data = CNNLSTMDataPrep(EMG_signals, labels, window_length=512, window_step=40,
@@ -179,18 +310,23 @@ class SelectionProcess:
                                                   std_values[channel])
         else:
             prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512, window_step=40,
-                                           batch_size=self.batch_size, sequence_length=15, label_delay=0, training_size=0.9,
+                                           batch_size=self.batch_size, sequence_length=15, label_delay=0, training_size=0.95,
                                            lstm_sequences=False, split_data=True, shuffle_full_dataset=True)
             x_train = prepped_data.x_train
             y_train = prepped_data.y_train
             y_test = prepped_data.y_test
             x_test = prepped_data.x_test
+        if self.reduced_test_set is not None:
+            cut_off = int(x_test.shape[-1]/self.reduced_test_set)
+            x_test = x_test[:, :, :, 0:cut_off]
+            y_test = y_test[:, :, 0:cut_off]
         self.x_train = x_train
         self.x_test = x_test
         self.y_train = y_train
         self.y_test = y_test
-        RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=self.epochs,
-                              saved_model_name='TCN_all_channels_' + self.subject + self.saved_name, angle_range=90)
+        RunningModel = RunTCN(self.x_train, self.y_train, self.x_test, self.y_test, n_channels=15, epochs=self.epochs,
+                              saved_model_name='TCN_all_channels_' + self.subject + self.saved_name, angle_range=90,
+                              initial_lr=self.initial_lr)
         RunningModel.train_network()
         self.performance_report = pd.DataFrame({'Number of channels': 15, 'Number of epochs': RunningModel.epochs_ran,
                                                 'Training loss': RunningModel.recorded_training_error,
@@ -253,7 +389,7 @@ class SelectionProcess:
                         else:
                             prepped_data = CNNLSTMDataPrep(train_signals, self.training_labels,
                                                            window_length=512, window_step=40, batch_size=self.batch_size, sequence_length=15,
-                                                           label_delay=0, training_size=0.9, lstm_sequences=False,
+                                                           label_delay=0, training_size=0.95, lstm_sequences=False,
                                                            split_data=True, shuffle_full_dataset=True)
                             x_train, y_train, x_test, y_test = prepped_data.prepped_data
 
@@ -268,7 +404,6 @@ class SelectionProcess:
                         print(training_rmse)
                         print(validation_rmse)
                         print(epochs_ran)
-                        exit()
                         print("WE HAVE JUST FINISHED LOOP NUMBER ", i)
                 new_row = pd.DataFrame([training_rmse], columns=self.general_report.columns, index=['Training error with ' + str(counter - 1) + ' electrodes'])
                 self.general_report = pd.concat([self.general_report, new_row])
@@ -324,7 +459,7 @@ class SelectionProcess:
                         RunningModel = RunTCN(x_train, self.y_train, x_test, self.y_test, n_channels=15, epochs=self.epochs,
                                               saved_model_name='TCN_' + self.subject + '_' + str(counter - 1) + self.saved_name +
                                                                '_electrodes_without_' + self.list_of_muscles[i],
-                                              angle_range=90)
+                                              angle_range=90, initial_lr=self.initial_lr)
                         RunningModel.train_network()
                         training_rmse.append(RunningModel.recorded_training_error)
                         validation_rmse.append(RunningModel.recorded_validation_error)
