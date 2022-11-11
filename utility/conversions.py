@@ -1,13 +1,17 @@
 from scipy.signal import find_peaks
 import numpy as np
 import scipy.signal as signal
+import matplotlib.pyplot as plt
 from statistics import median
 from scipy.interpolate import interp1d
+from sklearn.decomposition import NMF
+from sklearn.metrics import mean_squared_error
 import torch
 import math
 import pandas as pd
 # from utility.dataprocessing import extract_hdf5_data_to_EMG_and_labels
 # from networks import CNNLSTMDataPrep
+
 
 
 def upsample_based_on_axis(time_series, n_samples, axis=0):
@@ -25,6 +29,54 @@ def normalise_signals(x_train, x_test):
         x_train[:, channel] = x_train[:, channel] / (0.95 * np.max(np.abs(x_train[:, channel])))
         x_test[:, channel] = x_test[:, channel] / (0.95 * np.max(np.abs(x_train[:, channel])))
     return x_train, x_test
+
+
+def envelope(bipolar_data, fs=2000, hib=20, lob=400, lop=10, axis=0):
+    hi_band = hib / (fs / 2)
+    lo_band = lob / (fs / 2)
+    b, a = signal.butter(4, Wn=[hi_band, lo_band], btype='bandpass', output='ba')
+    filtered_data = signal.lfilter(b, a, bipolar_data, axis=axis)  # 2nd order bandpass butterworth filter
+    filtered_data = abs(filtered_data)  # Rectify the signal
+    lo_pass = lop / (fs / 2)
+    b, a = signal.butter(4, lo_pass, output='ba')  # create low-pass filter to get EMG envelope
+    filtered_data = signal.lfilter(b, a, filtered_data, axis=axis)
+    return filtered_data
+
+
+def determine_synergies(raw_emg_data, max_range):
+    list_of_muscles = ["ESL-L", "ESL-R", "ESI-L", "ESI-R", "MF-L", "MF-R", "RF", "VM", "VL", "BF", "ST", "TA", "SO",
+                       "GM", "GL"]
+    filtered_emg = envelope(raw_emg_data, axis=0)
+    filtered_emg = filtered_emg.clip(min=0)
+    component_range = list(range(3, max_range))
+    list_of_W = []
+    list_of_H = []
+    reconstruction_MSE = []
+    for i in component_range:
+        print("Searching for ", i, " components")
+        decomposition_model = NMF(n_components=i, init='random', max_iter=2000)
+        W = decomposition_model.fit_transform(filtered_emg)
+        H = decomposition_model.components_
+        list_of_W.append(W)
+        list_of_H.append(H)
+        # Evaluate the right number of components
+        reconstructed_emg = np.dot(W, H)
+        reconstruction_MSE.append(mean_squared_error(filtered_emg, reconstructed_emg))
+
+    idx = reconstruction_MSE.index(min(reconstruction_MSE))
+    n_components = component_range[idx]
+    W = list_of_W[idx]
+    H = list_of_H[idx]
+    print("There are ", n_components, " muscle synergies present")
+    print("The W matrix is given with a shape of  ", W.shape, ", as:")
+    print("The H matrix is given with a shape of  ", H.shape, ", as:")
+
+    plt.subplots(layout="constrained")
+    for i in range(n_components):
+        plt.subplot(n_components, 1, i+1)
+        plt.bar(list_of_muscles, H[i, :])
+
+    return n_components
 
 
 # def save_prepped_data(list_of_subjects, list_of_speeds, list_of_muscles, list_of_labels):

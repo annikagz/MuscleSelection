@@ -11,7 +11,7 @@ from utility.dataprocessing import split_signals_into_TCN_windows, group_windows
     split_into_train_test, split_into_batches, extract_hdf5_data_to_EMG_and_labels
 from utility.plots import plot_the_predictions
 from utility.conversions import normalise_signals
-from networks import RunConvLSTM, CNNLSTMDataPrep, RunTCN
+from networks import RunConvLSTM, CNNLSTMDataPrep, RunTCN, RunMLP
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -41,7 +41,7 @@ class PCAEvaluation:
                                 "TA", "SO", "GM", "GL"]
         self.recorded_rmse_report = None
         self.recorded_acc_report = None
-        self.list_of_subjects = ['DS07']#['DS01', 'DS02', 'DS04', 'DS05', 'DS06', 'DS07']
+        self.list_of_subjects = ['DS01', 'DS02', 'DS04', 'DS05', 'DS06', 'DS07']
         self.evaluate_PCA_selection()
 
     def evaluate_PCA_selection(self):
@@ -51,9 +51,9 @@ class PCAEvaluation:
                                            'PCA_' + self.PCA_type + '_var_selection.csv')
         report_idx = list(PCA_selected_muscles.index.values)
         recorded_idx = ['2 muscles', '3 muscles', '4 muscles', '5 muscles']
-        recorded_PCA_rmse_values = pd.DataFrame(columns=PCA_selected_muscles.head(),
+        recorded_PCA_rmse_values = pd.DataFrame(columns=self.list_of_subjects,
                                                 index=['2 muscles', '3 muscles', '4 muscles', '5 muscles'])
-        recorded_PCA_acc_values = pd.DataFrame(columns=PCA_selected_muscles.head(),
+        recorded_PCA_acc_values = pd.DataFrame(columns=self.list_of_subjects,
                                                index=['2 muscles', '3 muscles', '4 muscles', '5 muscles'])
         for subject in self.list_of_subjects:
             label_name = str(dominant_leg[subject]) + str(list_joint_angles[1])
@@ -76,7 +76,6 @@ class PCAEvaluation:
                 training_labels.append(labels)
             training_signals = np.concatenate(training_signals, axis=0)
             training_labels = np.concatenate(training_labels, axis=0)
-            print("Training signals shape is ", training_signals.shape, training_labels.shape)
             for i in range(len(testing_speeds)):
                 EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(subject, testing_speeds[i],
                                                                           self.list_of_muscles,
@@ -85,8 +84,6 @@ class PCAEvaluation:
                 testing_labels.append(labels)
             testing_signals = np.concatenate(testing_signals, axis=0)
             testing_labels = np.concatenate(testing_labels, axis=0)
-            print("Testing signals shape is ", testing_signals.shape, testing_labels.shape)
-
             training_data = CNNLSTMDataPrep(training_signals, training_labels, window_length=512,
                                             window_step=40, batch_size=self.batch_size, sequence_length=15,
                                             label_delay=0,
@@ -130,15 +127,19 @@ class PCAEvaluation:
                                                                         torch.min(y_test).item()))
                 self.recorded_rmse_report = recorded_PCA_rmse_values
                 self.recorded_acc_report = recorded_PCA_acc_values
+                self.recorded_rmse_report.to_csv(
+                    '/media/ag6016/Storage/MuscleSelection/VarianceReports/PCA_RMSE_evaluation_' +
+                    self.PCA_type + '_' + self.report_name + '.csv')
+                self.recorded_acc_report.to_csv(
+                    '/media/ag6016/Storage/MuscleSelection/VarianceReports/PCA_acc_evaluation_' +
+                    self.PCA_type + '_' + self.report_name + '.csv')
                 print(self.recorded_rmse_report)
                 print(self.recorded_acc_report)
-                input("CHECK")
 
         self.recorded_rmse_report.to_csv('/media/ag6016/Storage/MuscleSelection/VarianceReports/PCA_RMSE_evaluation_' +
                                          self.PCA_type + '_' + self.report_name + '.csv')
         self.recorded_acc_report.to_csv('/media/ag6016/Storage/MuscleSelection/VarianceReports/PCA_acc_evaluation_' +
                                         self.PCA_type + '_' + self.report_name + '.csv')
-
 
 
 class SelectionProcess:
@@ -154,7 +155,7 @@ class SelectionProcess:
     6) Retain the order in which the electrodes were removed
     6) Repeat the process until all the subjects have been done
     """
-    def __init__(self, subject, label_name, initial_lr, reserved_fraction=0.05, training_speeds=None, testing_speeds=None, saved_graph_name=None, batch_size=128, epochs=45, reduce_testing_set=None):
+    def __init__(self, subject, label_name, initial_lr, reserved_fraction=0.05, training_speeds=None, testing_speeds=None, saved_graph_name=None, batch_size=128, epochs=45, reduce_testing_set=None, model_type='TCN'):
         if subject == 'DS07':
             self.list_of_speeds = ['09', '10', '11', '12', '13', '14', '15', '16', '17', '18', 'R']
         else:
@@ -172,6 +173,7 @@ class SelectionProcess:
         self.epochs = epochs
         self.initial_lr = initial_lr
         self.reduced_test_set = reduce_testing_set
+        self.model_type = model_type
         self.training_signals = None
         self.updated_training_signals = None
         self.training_labels = None
@@ -181,11 +183,13 @@ class SelectionProcess:
         self.reserved_signals = None
         self.reserved_labels = None
         self.performance_report = None
+        self.muscles_used = [1] * len(self.list_of_muscles)
         self.general_report = pd.DataFrame(columns=list(self.list_of_muscles))
         self.x_train = None
         self.y_train = None
         self.x_test = None
         self.y_test = None
+        self.selection_report = pd.DataFrame(columns=self.list_of_muscles + ['Validation Loss', 'Validation accuracy'])
 
         if self.training_speeds is None:
             self.create_dataset_across_speeds()
@@ -200,20 +204,31 @@ class SelectionProcess:
         for speed in self.list_of_speeds:
             EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(self.subject, speed, self.list_of_muscles,
                                                                       label_name=self.label_name)
-            prepped_data = CNNLSTMDataPrep(EMG_signals, labels, window_length=512, window_step=40,
-                                           batch_size=32, sequence_length=15, label_delay=0, training_size=0.7,
-                                           lstm_sequences=False, split_data=True, shuffle_full_dataset=False)
-            x_train, y_train, x_test, y_test = prepped_data.prepped_data
-            RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
-                                  saved_model_name=self.subject + '_all_muscles_at_speed_' + speed,
-                                  angle_range=90, load_model=False)
+            if self.model_type == 'TCN':
+                prepped_data = CNNLSTMDataPrep(EMG_signals, labels, window_length=512, window_step=40,
+                                               batch_size=32, sequence_length=15, label_delay=0, training_size=0.7,
+                                               lstm_sequences=False, split_data=True, shuffle_full_dataset=False)
+                x_train, y_train, x_test, y_test = prepped_data.prepped_data
+                RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
+                                      saved_model_name=self.subject + '_TCN_all_muscles_at_speed_' + speed,
+                                      angle_range=90, load_model=False)
+            elif self.model_type == 'MLP':
+                prepped_data = CNNLSTMDataPrep(EMG_signals, labels, window_length=512, window_step=40,
+                                               batch_size=32, sequence_length=15, label_delay=0, training_size=0.7,
+                                               lstm_sequences=False, split_data=True, shuffle_full_dataset=False, filter_data=True)
+                x_train, y_train, x_test, y_test = prepped_data.prepped_data
+                RunningModel = RunMLP(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
+                                      saved_model_name=self.subject + '_MLP_all_muscles_at_speed_' + speed,
+                                      angle_range=90, load_model=False)
+            else:
+                raise Exception("This model type does not exist")
             RunningModel.train_network()
             new_row = pd.DataFrame([[speed, RunningModel.recorded_training_error, RunningModel.recorded_validation_error,
                                     RunningModel.recorded_training_error/(torch.max(y_train).item() - torch.min(y_train).item()),
                                     RunningModel.recorded_validation_error/(torch.max(y_test).item() - torch.min(y_test).item()),
                                     RunningModel.epochs_ran]], columns=columns)
             speed_performance_profiler = pd.concat([speed_performance_profiler, new_row], ignore_index=True)
-        speed_performance_profiler.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject + '_all_speeds.csv')
+        speed_performance_profiler.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject + '_' + self.model_type + '_all_speeds.csv')
 
     def get_pace_profile_per_subject(self):
         columns = ['Pace', 'Training RMSE', 'Validation RMSE', 'Training accuracy', 'Validation accuracy',
@@ -232,13 +247,24 @@ class SelectionProcess:
                 training_labels.append(labels)
             training_signals = np.concatenate(training_signals, axis=0)
             training_labels = np.concatenate(training_labels, axis=0)
-            prepped_data = CNNLSTMDataPrep(training_signals, training_labels, window_length=512, window_step=40,
-                                           batch_size=32, sequence_length=15, label_delay=0, training_size=0.7,
-                                           lstm_sequences=False, split_data=True, shuffle_full_dataset=True)
-            x_train, y_train, x_test, y_test = prepped_data.prepped_data
-            RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
-                                  saved_model_name=self.subject + '_all_muscles_at_pace_' + paces[pace_idx],
-                                  angle_range=90, load_model=False)
+            if self.model_type == 'TCN':
+                prepped_data = CNNLSTMDataPrep(training_signals, training_labels, window_length=512, window_step=40,
+                                               batch_size=32, sequence_length=15, label_delay=0, training_size=0.7,
+                                               lstm_sequences=False, split_data=True, shuffle_full_dataset=False)
+                x_train, y_train, x_test, y_test = prepped_data.prepped_data
+                RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
+                                      saved_model_name=self.subject + '_TCN_all_muscles_at_pace_' + paces[pace_idx],
+                                      angle_range=90, load_model=False)
+            elif self.model_type == 'MLP':
+                prepped_data = CNNLSTMDataPrep(training_signals, training_labels, window_length=512, window_step=40,
+                                               batch_size=32, sequence_length=15, label_delay=0, training_size=0.7,
+                                               lstm_sequences=False, split_data=True, shuffle_full_dataset=False, filter_data=True)
+                x_train, y_train, x_test, y_test = prepped_data.prepped_data
+                RunningModel = RunMLP(x_train, y_train, x_test, y_test, n_channels=15, epochs=800,
+                                      saved_model_name=self.subject + '_MLP_all_muscles_at_pace_' + paces[pace_idx],
+                                      angle_range=90, load_model=False)
+            else:
+                raise Exception("This model type does not exist")
             RunningModel.train_network()
             new_row = pd.DataFrame(
                 [[paces[pace_idx], RunningModel.recorded_training_error, RunningModel.recorded_validation_error,
@@ -292,16 +318,30 @@ class SelectionProcess:
 
     def train_model_with_all_channels(self):
         if self.training_speeds is not None and self.testing_speeds is not None:
-            training_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512,
-                                            window_step=40, batch_size=self.batch_size, sequence_length=15, label_delay=0,
-                                            training_size=0.99, lstm_sequences=False, split_data=True,
-                                            shuffle_full_dataset=True)
+            if self.model_type == 'TCN':
+                training_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512,
+                                                window_step=40, batch_size=self.batch_size, sequence_length=15, label_delay=0,
+                                                training_size=0.99, lstm_sequences=False, split_data=True,
+                                                shuffle_full_dataset=True)
+                testing_data = CNNLSTMDataPrep(self.testing_signals, self.testing_labels, window_length=512,
+                                               window_step=40, batch_size=1, sequence_length=15, label_delay=0,
+                                               training_size=0.99, lstm_sequences=False, split_data=True,
+                                               shuffle_full_dataset=True)
+            elif self.model_type == 'MLP':
+                training_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512,
+                                                window_step=40, batch_size=self.batch_size, sequence_length=15,
+                                                label_delay=0,
+                                                training_size=0.99, lstm_sequences=False, split_data=True,
+                                                shuffle_full_dataset=True, filter_data=True)
+                testing_data = CNNLSTMDataPrep(self.testing_signals, self.testing_labels, window_length=512,
+                                               window_step=40, batch_size=1, sequence_length=15, label_delay=0,
+                                               training_size=0.99, lstm_sequences=False, split_data=True,
+                                               shuffle_full_dataset=True, filter_data=True)
+            else:
+                raise Exception("This model type does not exist")
             x_train, y_train, _, _ = training_data.prepped_data
             average_values, std_values = training_data.norm_values
-            testing_data = CNNLSTMDataPrep(self.testing_signals, self.testing_labels, window_length=512,
-                                           window_step=40, batch_size=1, sequence_length=15, label_delay=0,
-                                           training_size=0.99, lstm_sequences=False, split_data=True,
-                                           shuffle_full_dataset=True)
+
             x_test, y_test, _, _ = testing_data.prepped_data
             for channel in range(x_train.shape[1]):
                 x_train[:, channel, :] = torch.div((torch.sub(x_train[:, channel, :], average_values[channel])),
@@ -309,9 +349,20 @@ class SelectionProcess:
                 x_test[:, channel, :] = torch.div((torch.sub(x_test[:, channel, :], average_values[channel])),
                                                   std_values[channel])
         else:
-            prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512, window_step=40,
-                                           batch_size=self.batch_size, sequence_length=15, label_delay=0, training_size=0.95,
-                                           lstm_sequences=False, split_data=True, shuffle_full_dataset=True)
+            if self.model_type == 'TCN':
+                prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512,
+                                               window_step=40, batch_size=self.batch_size, sequence_length=15,
+                                               label_delay=0, training_size=0.95, lstm_sequences=False, split_data=True,
+                                               shuffle_full_dataset=True)
+            elif self.model_type == 'MLP':
+                prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels, window_length=512,
+                                               window_step=40,
+                                               batch_size=self.batch_size, sequence_length=15, label_delay=0,
+                                               training_size=0.95,
+                                               lstm_sequences=False, split_data=True, shuffle_full_dataset=True,
+                                               filter_data=True)
+            else:
+                raise Exception("This model type does not exist")
             x_train = prepped_data.x_train
             y_train = prepped_data.y_train
             y_test = prepped_data.y_test
@@ -324,25 +375,40 @@ class SelectionProcess:
         self.x_test = x_test
         self.y_train = y_train
         self.y_test = y_test
-        RunningModel = RunTCN(self.x_train, self.y_train, self.x_test, self.y_test, n_channels=15, epochs=self.epochs,
-                              saved_model_name='TCN_all_channels_' + self.subject + self.saved_name, angle_range=90,
-                              initial_lr=self.initial_lr)
+        if self.model_type == 'TCN':
+            RunningModel = RunTCN(self.x_train, self.y_train, self.x_test, self.y_test, n_channels=15, epochs=self.epochs,
+                                  saved_model_name='TCN_all_channels_' + self.subject + self.saved_name, angle_range=90,
+                                  initial_lr=self.initial_lr)
+        elif self.model_type == 'MLP':
+            RunningModel = RunMLP(self.x_train, self.y_train, self.x_test, self.y_test, n_channels=15,
+                                  epochs=self.epochs,
+                                  saved_model_name='MLP_all_channels_' + self.subject + self.saved_name, angle_range=90,
+                                  initial_lr=self.initial_lr)
+        else:
+            raise Exception("This model type does not exist")
         RunningModel.train_network()
-        self.performance_report = pd.DataFrame({'Number of channels': 15, 'Number of epochs': RunningModel.epochs_ran,
-                                                'Training loss': RunningModel.recorded_training_error,
-                                                'Validation loss': RunningModel.recorded_validation_error,
-                                                'Training accuracy': 1 - (RunningModel.recorded_training_error /
-                                                                          (torch.max(y_train).item() -
-                                                                           torch.min(y_train).item())),
-                                                'Validation accuracy': 1 - (RunningModel.recorded_validation_error /
-                                                                            (torch.max(y_test).item() -
-                                                                             torch.min(y_test).item())),
-                                                'Electrode removed': 'None'}, index=[0])
+        # self.performance_report = pd.DataFrame({'Number of channels': 15, 'Number of epochs': RunningModel.epochs_ran,
+        #                                         'Training loss': RunningModel.recorded_training_error,
+        #                                         'Validation loss': RunningModel.recorded_validation_error,
+        #                                         'Training accuracy': 1 - (RunningModel.recorded_training_error /
+        #                                                                   (torch.max(y_train).item() -
+        #                                                                    torch.min(y_train).item())),
+        #                                         'Validation accuracy': 1 - (RunningModel.recorded_validation_error /
+        #                                                                     (torch.max(y_test).item() -
+        #                                                                      torch.min(y_test).item())),
+        #                                         'Electrode removed': 'None'}, index=[0])
+
+        new_selection_row = self.muscles_used + [RunningModel.recorded_validation_error, 1 -
+                                                 (RunningModel.recorded_validation_error / (torch.max(y_test).item() -
+                                                                                            torch.min(y_test).item()))]
+        new_row = pd.DataFrame([new_selection_row], columns=self.selection_report.columns, index=['15 electrodes'])
+        self.selection_report = pd.concat([self.selection_report, new_row])
+
 
     def train_with_one_drop_out(self):
         self.train_model_with_all_channels()
-        self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                       '_channel_selection_performance_' + self.saved_name + '.csv')
+        # self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject + '_' +
+        #                                self.model_type + '_channel_selection_performance_' + self.saved_name + '.csv')
         if self.x_train is None:
             self.updated_training_signals = self.training_signals.copy()
             if self.testing_signals is not None:
@@ -368,16 +434,41 @@ class SelectionProcess:
                             test_signals = self.updated_testing_signals.copy()
                             test_signals[:, i] = 0
                             print("The testing signals for this loop are ", test_signals[0, :])
-                            training_data = CNNLSTMDataPrep(train_signals, self.training_labels, window_length=512,
-                                                            window_step=40, batch_size=self.batch_size, sequence_length=15,
-                                                            label_delay=0, training_size=0.99, lstm_sequences=False,
-                                                            split_data=True, shuffle_full_dataset=True)
+                            if self.model_type == 'TCN':
+                                training_data = CNNLSTMDataPrep(self.training_signals, self.training_labels,
+                                                                window_length=512,
+                                                                window_step=40, batch_size=self.batch_size,
+                                                                sequence_length=15, label_delay=0,
+                                                                training_size=0.99, lstm_sequences=False,
+                                                                split_data=True,
+                                                                shuffle_full_dataset=True)
+                                testing_data = CNNLSTMDataPrep(self.testing_signals, self.testing_labels,
+                                                               window_length=512,
+                                                               window_step=40, batch_size=1, sequence_length=15,
+                                                               label_delay=0,
+                                                               training_size=0.99, lstm_sequences=False,
+                                                               split_data=True,
+                                                               shuffle_full_dataset=True)
+                            elif self.model_type == 'MLP':
+                                training_data = CNNLSTMDataPrep(self.training_signals, self.training_labels,
+                                                                window_length=512,
+                                                                window_step=40, batch_size=self.batch_size,
+                                                                sequence_length=15,
+                                                                label_delay=0,
+                                                                training_size=0.99, lstm_sequences=False,
+                                                                split_data=True,
+                                                                shuffle_full_dataset=True, filter_data=True)
+                                testing_data = CNNLSTMDataPrep(self.testing_signals, self.testing_labels,
+                                                               window_length=512,
+                                                               window_step=40, batch_size=1, sequence_length=15,
+                                                               label_delay=0,
+                                                               training_size=0.99, lstm_sequences=False,
+                                                               split_data=True,
+                                                               shuffle_full_dataset=True, filter_data=True)
+                            else:
+                                raise Exception("This model type does not exist")
                             x_train, y_train, _, _ = training_data.prepped_data
                             average_values, std_values = training_data.norm_values
-                            testing_data = CNNLSTMDataPrep(test_signals, self.testing_labels, window_length=512,
-                                                           window_step=40, batch_size=1, sequence_length=15, label_delay=0,
-                                                           training_size=0.99, lstm_sequences=False, split_data=True,
-                                                           shuffle_full_dataset=True)
                             x_test, y_test, _, _ = testing_data.prepped_data
                             for channel in range(x_train.shape[1]):
                                 x_train[:, channel, :] = torch.div(
@@ -387,16 +478,44 @@ class SelectionProcess:
                                     (torch.sub(x_test[:, channel, :], average_values[channel])),
                                     std_values[channel])
                         else:
-                            prepped_data = CNNLSTMDataPrep(train_signals, self.training_labels,
-                                                           window_length=512, window_step=40, batch_size=self.batch_size, sequence_length=15,
-                                                           label_delay=0, training_size=0.95, lstm_sequences=False,
-                                                           split_data=True, shuffle_full_dataset=True)
+                            if self.model_type == 'TCN':
+                                prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels,
+                                                               window_length=512,
+                                                               window_step=40, batch_size=self.batch_size,
+                                                               sequence_length=15,
+                                                               label_delay=0, training_size=0.95, lstm_sequences=False,
+                                                               split_data=True,
+                                                               shuffle_full_dataset=True)
+                            elif self.model_type == 'MLP':
+                                prepped_data = CNNLSTMDataPrep(self.training_signals, self.training_labels,
+                                                               window_length=512,
+                                                               window_step=40,
+                                                               batch_size=self.batch_size, sequence_length=15,
+                                                               label_delay=0,
+                                                               training_size=0.95,
+                                                               lstm_sequences=False, split_data=True,
+                                                               shuffle_full_dataset=True,
+                                                               filter_data=True)
+                            else:
+                                raise Exception("This model type does not exist")
                             x_train, y_train, x_test, y_test = prepped_data.prepped_data
+                        if self.model_type == 'TCN':
+                            RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15,
+                                                  epochs=self.epochs,
+                                                  saved_model_name='TCN_' + self.subject + '_' + str(counter-1) +
+                                                                   '_electrodes_without_' + self.list_of_muscles[i],
+                                                  angle_range=90,
+                                                  initial_lr=self.initial_lr)
+                        elif self.model_type == 'MLP':
+                            RunningModel = RunMLP(x_train, y_train, x_test, y_test, n_channels=15,
+                                                  epochs=self.epochs,
+                                                  saved_model_name='MLP_' + self.subject + '_' + str(counter-1) +
+                                                                   '_electrodes_without_' + self.list_of_muscles[i],
+                                                  angle_range=90,
+                                                  initial_lr=self.initial_lr)
+                        else:
+                            raise Exception("This model type does not exist")
 
-                        RunningModel = RunTCN(x_train, y_train, x_test, y_test, n_channels=15, epochs=10,
-                                              saved_model_name='TCN_' + self.subject + '_' + str(counter-1) +
-                                                               '_electrodes_without_' + self.list_of_muscles[i],
-                                              angle_range=90)
                         RunningModel.train_network()
                         training_rmse.append(RunningModel.recorded_training_error)
                         validation_rmse.append(RunningModel.recorded_validation_error)
@@ -405,36 +524,51 @@ class SelectionProcess:
                         print(validation_rmse)
                         print(epochs_ran)
                         print("WE HAVE JUST FINISHED LOOP NUMBER ", i)
-                new_row = pd.DataFrame([training_rmse], columns=self.general_report.columns, index=['Training error with ' + str(counter - 1) + ' electrodes'])
-                self.general_report = pd.concat([self.general_report, new_row])
-                new_row = pd.DataFrame([validation_rmse], columns=self.general_report.columns,
-                                       index=['Validation error with ' + str(counter - 1) + ' electrodes'])
-                self.general_report = pd.concat([self.general_report, new_row])
-                new_row = pd.DataFrame([epochs_ran], columns=self.general_report.columns,
-                                       index=['Epochs ran with ' + str(counter - 1) + ' electrodes'])
-                self.general_report = pd.concat([self.general_report, new_row])
+
+                # new_row = pd.DataFrame([training_rmse], columns=self.general_report.columns, index=['Training error with ' + str(counter - 1) + ' electrodes'])
+                # self.general_report = pd.concat([self.general_report, new_row])
+                # new_row = pd.DataFrame([validation_rmse], columns=self.general_report.columns,
+                #                        index=['Validation error with ' + str(counter - 1) + ' electrodes'])
+                # self.general_report = pd.concat([self.general_report, new_row])
+                # new_row = pd.DataFrame([epochs_ran], columns=self.general_report.columns,
+                #                        index=['Epochs ran with ' + str(counter - 1) + ' electrodes'])
+                # self.general_report = pd.concat([self.general_report, new_row])
+
                 electrode_to_remove = validation_rmse.index(min(validation_rmse))
                 print("The electrode to remove is ", electrode_to_remove)
+                muscles_used = self.muscles_used
+                muscles_used[electrode_to_remove] = 0
+                self.muscles_used = muscles_used
+                print(self.muscles_used)
+                input("CHECK")
                 # we want to remove the electrode whose absence has the least impact on model accuracy
-                new_row = pd.DataFrame([[counter-1, epochs_ran[electrode_to_remove], training_rmse[electrode_to_remove],
-                                        validation_rmse[electrode_to_remove], 1 - (training_rmse[electrode_to_remove] /
-                                                                                   (np.max(self.training_labels) -
-                                                                                    np.min(self.training_labels))),
-                                        1 - (validation_rmse[electrode_to_remove] / (np.max(self.training_labels) -
-                                                                                     np.min(self.training_labels))),
-                                        self.list_of_muscles[electrode_to_remove]]], columns=self.performance_report.columns)
-                self.performance_report = pd.concat([self.performance_report, new_row], ignore_index=True)
+
+                new_selection_row = self.muscles_used + [validation_rmse[electrode_to_remove], 1 -
+                                                         (validation_rmse[electrode_to_remove] /
+                                                          (np.max(self.training_labels) -
+                                                           np.min(self.training_labels)))]
+                new_row = pd.DataFrame([new_selection_row], columns=self.selection_report.columns,
+                                       index=[counter-1])
+                self.selection_report = pd.concat([self.selection_report, new_row])
+                self.selection_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.model_type + '/' + self.subject +
+                                             '_' + self.model_type + '_channel_selection_transition.csv')
+                # new_row = pd.DataFrame([[counter-1, epochs_ran[electrode_to_remove], training_rmse[electrode_to_remove],
+                #                         validation_rmse[electrode_to_remove], 1 - (training_rmse[electrode_to_remove] /
+                #                                                                    (np.max(self.training_labels) -
+                #                                                                     np.min(self.training_labels))),
+                #                         1 - (validation_rmse[electrode_to_remove] / (np.max(self.training_labels) -
+                #                                                                      np.min(self.training_labels))),
+                #                         self.list_of_muscles[electrode_to_remove]]], columns=self.performance_report.columns)
+                # self.performance_report = pd.concat([self.performance_report, new_row], ignore_index=True)
+
                 self.updated_training_signals[:, electrode_to_remove] = 0
                 self.updated_testing_signals[:, electrode_to_remove] = 0
-                self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                               '_channel_selection_performance_transition.csv')
-                self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                           '_channel_info_transition.csv')
+                # self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
+                #                                '_channel_selection_performance_transition.csv')
+                # self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
+                #                            '_channel_info_transition.csv')
                 counter -= 1
-            self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                           '_channel_selection_performance_transition.csv')
-            self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                       '_channel_info_transition.csv')
+
         else:
             self.updated_training_signals = self.x_train.clone()
             self.updated_testing_signals = self.x_test.clone()
@@ -456,10 +590,23 @@ class SelectionProcess:
                         x_train[:, i, :, :] = 0
                         x_test = self.updated_testing_signals.clone()
                         x_test[:, i, :, :] = 0
-                        RunningModel = RunTCN(x_train, self.y_train, x_test, self.y_test, n_channels=15, epochs=self.epochs,
-                                              saved_model_name='TCN_' + self.subject + '_' + str(counter - 1) + self.saved_name +
-                                                               '_electrodes_without_' + self.list_of_muscles[i],
-                                              angle_range=90, initial_lr=self.initial_lr)
+                        if self.model_type == 'TCN':
+                            RunningModel = RunTCN(x_train, self.y_train, x_test, self.y_test, n_channels=15,
+                                                  epochs=self.epochs,
+                                                  saved_model_name='TCN_' + self.subject + '_' + str(counter-1) +
+                                                                   '_electrodes_without_' + self.list_of_muscles[i],
+                                                  angle_range=90,
+                                                  initial_lr=self.initial_lr)
+                        elif self.model_type == 'MLP':
+                            RunningModel = RunMLP(x_train, self.y_train, x_test, self.y_test, n_channels=15,
+                                                  epochs=self.epochs,
+                                                  saved_model_name='MLP_' + self.subject + '_' + str(counter-1) +
+                                                                   '_electrodes_without_' + self.list_of_muscles[i],
+                                                  angle_range=90,
+                                                  initial_lr=self.initial_lr)
+                        else:
+                            raise Exception("This model type does not exist")
+
                         RunningModel.train_network()
                         training_rmse.append(RunningModel.recorded_training_error)
                         validation_rmse.append(RunningModel.recorded_validation_error)
@@ -468,38 +615,53 @@ class SelectionProcess:
                         print(validation_rmse)
                         print(epochs_ran)
                         print("WE HAVE JUST FINISHED LOOP NUMBER ", i)
-                new_row = pd.DataFrame([training_rmse], columns=self.general_report.columns,
-                                       index=['Training error with ' + str(counter - 1) + ' electrodes'])
-                self.general_report = pd.concat([self.general_report, new_row])
-                new_row = pd.DataFrame([validation_rmse], columns=self.general_report.columns,
-                                       index=['Validation error with ' + str(counter - 1) + ' electrodes'])
-                self.general_report = pd.concat([self.general_report, new_row])
-                new_row = pd.DataFrame([epochs_ran], columns=self.general_report.columns,
-                                       index=['Epochs ran with ' + str(counter - 1) + ' electrodes'])
-                self.general_report = pd.concat([self.general_report, new_row])
+
+                # new_row = pd.DataFrame([training_rmse], columns=self.general_report.columns,
+                #                        index=['Training error with ' + str(counter - 1) + ' electrodes'])
+                # self.general_report = pd.concat([self.general_report, new_row])
+                # new_row = pd.DataFrame([validation_rmse], columns=self.general_report.columns,
+                #                        index=['Validation error with ' + str(counter - 1) + ' electrodes'])
+                # self.general_report = pd.concat([self.general_report, new_row])
+                # new_row = pd.DataFrame([epochs_ran], columns=self.general_report.columns,
+                #                        index=['Epochs ran with ' + str(counter - 1) + ' electrodes'])
+                # self.general_report = pd.concat([self.general_report, new_row])
+
                 electrode_to_remove = validation_rmse.index(min(validation_rmse))
                 print("The electrode to remove is ", electrode_to_remove)
+                muscles_used = self.muscles_used
+                muscles_used[electrode_to_remove] = 0
+                self.muscles_used = muscles_used
+                print(self.muscles_used)
                 # we want to remove the electrode whose absence has the least impact on model accuracy
-                new_row = pd.DataFrame(
-                    [[counter - 1, epochs_ran[electrode_to_remove], training_rmse[electrode_to_remove],
-                      validation_rmse[electrode_to_remove], 1 - (training_rmse[electrode_to_remove] /
-                                                                 (np.max(self.training_labels) -
-                                                                  np.min(self.training_labels))),
-                      1 - (validation_rmse[electrode_to_remove] / (np.max(self.training_labels) -
-                                                                   np.min(self.training_labels))),
-                      self.list_of_muscles[electrode_to_remove]]], columns=self.performance_report.columns)
-                self.performance_report = pd.concat([self.performance_report, new_row], ignore_index=True)
+
+                new_selection_row = self.muscles_used + [validation_rmse[electrode_to_remove], 1 -
+                                                         (validation_rmse[electrode_to_remove] /
+                                                          (np.max(self.training_labels) -
+                                                           np.min(self.training_labels)))]
+                new_row = pd.DataFrame([new_selection_row], columns=self.selection_report.columns,
+                                       index=[counter - 1])
+                self.selection_report = pd.concat([self.selection_report, new_row])
+                self.selection_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.model_type + '/' + self.subject +
+                                             '_' + self.model_type + '_channel_selection_' + self.saved_name + 'csv')
+
+                # new_row = pd.DataFrame(
+                #     [[counter - 1, epochs_ran[electrode_to_remove], training_rmse[electrode_to_remove],
+                #       validation_rmse[electrode_to_remove], 1 - (training_rmse[electrode_to_remove] /
+                #                                                  (np.max(self.training_labels) -
+                #                                                   np.min(self.training_labels))),
+                #       1 - (validation_rmse[electrode_to_remove] / (np.max(self.training_labels) -
+                #                                                    np.min(self.training_labels))),
+                #       self.list_of_muscles[electrode_to_remove]]], columns=self.performance_report.columns)
+                # self.performance_report = pd.concat([self.performance_report, new_row], ignore_index=True)
+
                 self.updated_training_signals[:, electrode_to_remove, :, :] = 0
                 self.updated_testing_signals[:, electrode_to_remove, :, :] = 0
-                self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                               '_channel_selection_performance_' + self.saved_name + '.csv')
-                self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                           '_channel_info_' + self.saved_name + '.csv')
+
+                # self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
+                #                                '_channel_selection_performance_' + self.saved_name + '.csv')
+                # self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
+                #                            '_channel_info_' + self.saved_name + '.csv')
                 counter -= 1
-            self.performance_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                           '_channel_selection_performance_' + self.saved_name + '.csv')
-            self.general_report.to_csv('/media/ag6016/Storage/MuscleSelection/SubjectReports/' + self.subject +
-                                       '_channel_info_' + self.saved_name + '.csv')
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from utility.dataprocessing import split_signals_into_TCN_windows, group_windows_into_sequences, shuffle, \
     split_into_train_test, split_into_batches
-from utility.conversions import normalise_signals
+from utility.conversions import normalise_signals, envelope
 import time
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -28,7 +28,7 @@ class CNNLSTMDataPrep:
     (1, sequence_length, 1, 1, n_sequences)
     """
     def __init__(self, EMG_signals, labels, window_length, window_step, batch_size, sequence_length=10, label_delay=0,
-                 training_size=0.9, lstm_sequences=True, split_data=True, shuffle_full_dataset=True):
+                 training_size=0.9, lstm_sequences=True, split_data=True, shuffle_full_dataset=True, filter_data=False):
         # self.EMG_signals = EMG_signals
         # self.labels = labels
         # self.n_channels = self.EMG_signals.shape[-1]
@@ -49,6 +49,9 @@ class CNNLSTMDataPrep:
         # WINDOW THE SIGNAL ----------------------------------------------------------------------------------------
         self.EMG_signals, self.labels = split_signals_into_TCN_windows(EMG_signals, labels, self.window_length,
                                                                        self.window_step, self.prediction_delay, False)
+
+        if filter_data:
+            self.EMG_signals = envelope(self.EMG_signals, axis=0)
 
         if shuffle_full_dataset:
             # SHUFFLE ALONG THE N_SEQUENCE AXIS ------------------------------------------------------------------------
@@ -382,7 +385,7 @@ class TempConvNetwork(nn.Module):
 
 
 class RunTCN:
-    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range, load_model=False, initial_lr=0.001):
+    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range, load_model=False, initial_lr=0.001, lr_update_step=5):
 
         self.model = TempConvNetwork(n_inputs=n_channels, kernel_size=5, stride=1, dilation=4, dropout=0.4, angle_range=angle_range).to(device)
         self.model_type = 'TCN'
@@ -424,7 +427,6 @@ class RunTCN:
                 optimizer.step()
                 running_training_loss += loss.item()
                 rep_step += 1
-            print(loss.item())
             recorded_training_error = math.sqrt(running_training_loss / (self.x_train.shape[-1]))
             self.writer.add_scalar("Epoch training loss ", recorded_training_error, global_step=epoch)
             # VALIDATION LOOP
@@ -510,5 +512,143 @@ class RunTCN:
             #     lr = 0.000000001
             #     print("update of lr number 6")
             # elif cut_off_counter > 5 and lr == 0.000000001:
+            elif cut_off_counter > 5 and lr == 0.0000001:
+                break
+
+
+# MLP REGRESSOR
+
+class MLPRegressor(nn.Module):
+    def __init__(self, n_channels, sample_length):
+        super(MLPRegressor, self).__init__()
+        self.n_channels = n_channels
+        self.sample_length = sample_length
+        self.flattened_length = int(self.n_channels * self.sample_length)
+
+        self.MLP = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(int(self.flattened_length), int(self.flattened_length/4)),  # (1, 512)
+            nn.ReLU(),
+            nn.Linear(int(self.flattened_length / 4), int(self.flattened_length / 16)),  # (1, 256)
+            nn.ReLU(),
+            nn.Linear(int(self.flattened_length / 16), int(self.flattened_length / 32)),  # (1, 128)
+            nn.ReLU(),
+            nn.Linear(int(self.flattened_length / 32), int(self.flattened_length / 64)),  # (1, 128)
+            nn.ReLU(),
+            nn.Linear(int(self.flattened_length / 64), int(self.flattened_length / 128)),  # (1, 128)
+            nn.ReLU(),
+            nn.Linear(int(self.flattened_length / 128), int(self.flattened_length / 256)),  # (1, 128)
+            nn.ReLU(),
+            nn.Linear(int(self.flattened_length / 256), 1)
+            )
+
+    def forward(self, EMG_signal):
+        out = self.MLP(EMG_signal)
+        return out
+
+
+
+class RunMLP:
+    def __init__(self, x_train, y_train, x_test, y_test, n_channels, epochs, saved_model_name, angle_range, load_model=False, initial_lr=0.001, lr_update_step=5):
+
+        self.model = MLPRegressor(n_channels, sample_length=512).to(device)
+        self.model_type = 'MLP'
+        self.saved_model_name = saved_model_name
+        self.saved_model_path = '/media/ag6016/Storage/MuscleSelection/Models/' + self.saved_model_name + '.pth'
+        if load_model:
+            self.model.load_state_dict(torch.load(self.saved_model_path))
+        self.criterion = nn.MSELoss().to(device)
+        self.epochs = epochs
+        self.writer = SummaryWriter()
+        self.x_train = x_train
+        self.y_train = y_train
+        self.x_test = x_test
+        self.y_test = y_test
+        self.initial_lr = initial_lr
+        self.updated_lr = None
+        self.recorded_training_error = 100
+        self.recorded_validation_error = 100
+        self.epochs_ran = 0
+
+    def train_network(self):
+        rep_step = 0
+        lowest_error = 1000.0
+        cut_off_counter = 0
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.initial_lr, betas=(0.9, 0.999))
+        lr = self.initial_lr
+        for epoch in range(self.epochs):
+            print("Epoch number:", epoch)
+            running_training_loss = 0.0
+            running_validation_loss = 0.0
+            for rep in tqdm(np.arange(self.x_train.shape[-1])):
+                x_train = self.x_train[:, :, :, rep].to(device)
+                y_train = self.y_train[:, :, rep].to(device)
+                predicted = self.model.forward(EMG_signal=x_train.float())
+                loss = self.criterion(predicted, y_train.float())
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                running_training_loss += loss.item()
+                rep_step += 1
+            recorded_training_error = math.sqrt(running_training_loss / (self.x_train.shape[-1]))
+            self.writer.add_scalar("Epoch training loss ", recorded_training_error, global_step=epoch)
+            # VALIDATION LOOP
+            with torch.no_grad():
+                for rep in range(self.x_test.shape[-1]):
+                    x_test = self.x_test[:, :, :, rep].to(device)
+                    y_test = self.y_test[:, :, rep].to(device)
+                    predicted = self.model.forward(EMG_signal=x_test.float())
+                    validation_loss = self.criterion(predicted, y_test.float())
+                    running_validation_loss += validation_loss.item()
+            recorded_validation_error = math.sqrt(running_validation_loss / (self.x_test.shape[-1]))
+            self.writer.add_scalar("Epoch val loss ", recorded_validation_error, global_step=epoch)
+            if recorded_validation_error < lowest_error:
+                torch.save(self.model.state_dict(), self.saved_model_path)
+                lowest_error = recorded_validation_error
+                self.recorded_validation_error = recorded_validation_error
+                self.recorded_training_error = recorded_training_error
+                print("The errors are ", self.recorded_training_error, self.recorded_validation_error)
+                self.epochs_ran = epoch
+                cut_off_counter = 0
+                print("it's lower")
+            else:
+                cut_off_counter += 1
+
+            if cut_off_counter > 3 and lr == self.initial_lr:
+                self.updated_lr = self.initial_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 1")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 2")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 3")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 4")
+            elif cut_off_counter > 5 and lr == self.updated_lr:
+                self.updated_lr = self.updated_lr / 10
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.updated_lr, betas=(0.9, 0.999))
+                self.model.load_state_dict(torch.load(self.saved_model_path))
+                cut_off_counter = 0
+                lr = self.updated_lr
+                print("update of lr number 5")
             elif cut_off_counter > 5 and lr == 0.0000001:
                 break

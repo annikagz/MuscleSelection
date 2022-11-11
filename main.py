@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 from utility.dataprocessing import extract_c3d_data_to_hdf5, extract_hdf5_data_to_EMG_and_labels
 from utility.plots import plot_the_predictions
-from utility.conversions import normalise_signals
+from utility.conversions import normalise_signals, determine_synergies
 from networks import CNNLSTMDataPrep, RunConvLSTM, RunTCN
 from selectionprocess import SelectionProcess, PCAEvaluation
 
@@ -18,6 +18,52 @@ list_joint_angles = ["HipAngles", "KneeAngles", "AnkleAngles"]
 subject_idx = 0
 speed_idx = 0
 label_idx = 1
+
+
+for i in range(len(list_of_subjects)):
+    print("We are looking at subject ", list_of_subjects[i])
+    label = str(dominant_leg[list_of_subjects[i]]) + str(list_joint_angles[1])
+    selection_algorithm = SelectionProcess(list_of_subjects[i], label, initial_lr=0.000005,
+                                           saved_graph_name='all_speeds', batch_size=64, epochs=100,
+                                           reduce_testing_set=8, model_type='MLP')
+    selection_algorithm.train_with_one_drop_out()
+
+exit()
+
+
+def get_all_signals_across_speeds(subject, list_of_speeds, label_name):
+    list_of_muscles = ["ESL-L", "ESL-R", "ESI-L", "ESI-R", "MF-L", "MF-R", "RF", "VM", "VL", "BF", "ST", "TA", "SO",
+                       "GM", "GL"]
+    training_signals = []
+    training_labels = []
+    for i in range(len(list_of_speeds) - 1):
+        EMG_signals, labels = extract_hdf5_data_to_EMG_and_labels(subject, list_of_speeds[i], list_of_muscles,
+                                                                  label_name=label_name)
+        training_signals.append(EMG_signals)
+        training_labels.append(labels)
+    training_signals = np.concatenate(training_signals, axis=0)
+    training_labels = np.concatenate(training_labels, axis=0)
+
+    return training_signals, training_labels
+
+
+# max_components_list = [5, 8, 11]
+#
+# for i in range(len(max_components_list)):
+#     for subject_idx in range(len(list_of_subjects)):
+#         label = str(dominant_leg[list_of_subjects[subject_idx]]) + str(list_joint_angles[1])
+#         EMG_signals, labels = get_all_signals_across_speeds(list_of_subjects[subject_idx], list_of_speeds, label)
+#         print(EMG_signals.shape, labels.shape)
+#         range_components = max_components_list[i]
+#         n_components = determine_synergies(EMG_signals, range_components)
+#         plt.suptitle(list_of_subjects[subject_idx])
+#         plt.savefig('/media/ag6016/Storage/MuscleSelection/synergies/'+list_of_subjects[subject_idx] + '_' +
+#                     str(n_components) + '_synergies.pdf')
+#         plt.show(block=False)
+#         plt.pause(3)
+#         plt.close()
+#
+# exit()
 
 # print("We are training the fast vs medium speed")
 # training_speeds = ['15', '16', '17', '18']
@@ -99,13 +145,13 @@ label_idx = 1
 training_speeds = ['15', '16', '17', '18']
 testing_speeds = ['07', '08', '09', '10']
 PCAEvaluation(initial_lr=0.000005, training_speeds=training_speeds, testing_speeds=testing_speeds,
-              report_name='tested_on_slow', batch_size=64, epochs=30, PCA_selection_used='max', reduce_testing_set=2)
+              report_name='tested_on_slow', batch_size=64, epochs=30, PCA_selection_used='min', reduce_testing_set=4)
 
 testing_speeds = ['11', '12', '13', '14']
 PCAEvaluation(initial_lr=0.000005, training_speeds=training_speeds, testing_speeds=testing_speeds,
-              report_name='tested_on_med', batch_size=64, epochs=30, PCA_selection_used='max', reduce_testing_set=2)
+              report_name='tested_on_med', batch_size=64, epochs=30, PCA_selection_used='min', reduce_testing_set=4)
 
 training_speeds = ['07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18']
 testing_speeds = ['R']
 PCAEvaluation(initial_lr=0.00001, training_speeds=training_speeds, testing_speeds=testing_speeds,
-              report_name='tested_on_transient', batch_size=128, epochs=50, PCA_selection_used='max')
+              report_name='tested_on_transient', batch_size=128, epochs=50, PCA_selection_used='min')
